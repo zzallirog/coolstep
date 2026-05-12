@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>coolstep — instrument log</title>
+<link rel="preconnect" href="https://esm.sh" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<!-- Display: Instrument Serif (regular + italic). Body sans: IBM Plex Sans.
+     Data mono: IBM Plex Mono. Three families, one identity. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="/static/styles.css" />
+<!-- FOUC-guard: apply saved theme synchronously before any tile paints.
+     Inline because the theme-switcher module loads async via type=module
+     and would otherwise repaint the page in the default palette first. -->
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('coolstep.theme');
+      var ok = ['graphite','amber','blueprint','parchment','obsidian','redline'];
+      if (t && ok.indexOf(t) !== -1 && t !== 'graphite') {
+        document.documentElement.setAttribute('data-theme', t);
+      }
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<header class="masthead" role="banner">
+  <!-- Brass-plate glyph: four traces of decreasing thermal signal, like a
+       scope showing a workload pulse settling. Same vocabulary as the
+       sparkline tile, lensing the brand to its primary measurement. -->
+  <svg class="glyph" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.4"
+       stroke-linecap="round" aria-hidden="true">
+    <path d="M3 10 q3.5 -4 7 0 t7 0 t7 0" opacity="0.95"/>
+    <path d="M3 14 q3.5 -4 7 0 t7 0 t7 0" opacity="0.7"/>
+    <path d="M3 18 q3.5 -4 7 0 t7 0 t7 0" opacity="0.45"/>
+    <path d="M3 22 q3.5 -4 7 0 t7 0 t7 0" opacity="0.22"/>
+  </svg>
+  <div>
+    <h1 class="wordmark">coolstep<span class="dot">·</span></h1>
+    <span class="tagline" data-i18n="shell.tagline">predictive soft-cooling · field notebook</span>
+  </div>
+  <div class="masthead-pills" role="status" aria-live="polite">
+    <span class="pill" id="pill-mode" data-i18n="shell.pill.mode.calibrating">mode: calibrating</span>
+    <span class="pill" id="pill-coverage" data-i18n-prefix="shell.pill.coverage">coverage: —</span>
+    <span class="pill" id="pill-signals" data-i18n-prefix="shell.pill.signals">signals: —</span>
+    <span class="pill" id="pill-actuators" data-i18n-prefix="shell.pill.actuators" title="">actuators: —</span>
+    <span class="pill" id="pill-drift" data-i18n-prefix="shell.pill.drift" hidden>drift: —</span>
+    <span class="pill" id="pill-health" data-i18n="shell.pill.daemon.checking">daemon: checking…</span>
+    <span class="pill" id="pill-stress" data-i18n="shell.pill.stress.idle">stress: idle</span>
+    <span class="pill" id="pill-profile" data-i18n="shell.pill.profile.other">profile: other</span>
+    <span class="pill" id="pill-crash" data-i18n="shell.pill.crash.never" hidden>recovery: never</span>
+    <mode-switcher aria-label="Operational mode"></mode-switcher>
+    <lang-switcher aria-label="Language"></lang-switcher>
+    <theme-switcher aria-label="Theme"></theme-switcher>
+  </div>
+</header>
+
+<section class="hero-narrative" aria-label="What coolstep does">
+  <div class="hero-lead">
+    <p class="hero-eyebrow" data-i18n="hero.eyebrow">live telemetry · realtime ML · soft hardware nudges</p>
+    <p class="hero-claim" data-i18n-html="hero.claim">
+      Reactive thermal control fires <em>after</em> the silicon has already touched
+      the trip point. <strong>coolstep</strong> looks ahead — learns the workload's
+      fingerprint, predicts the peak in the next 30 s, lifts the fan curve and
+      boost cap <em>before</em> the chip warms.
+    </p>
+  </div>
+
+  <ol class="hero-layers" aria-label="Two key ideas">
+    <li class="hero-layer" data-layer="1">
+      <span class="hero-layer-no">01</span>
+      <span class="hero-layer-name" data-i18n="hero.layer.1.name">Anticipate</span>
+      <span class="hero-layer-body" data-i18n-html="hero.layer.1.body">
+        When the predictor sees a load peak in the next 30 s, fans get a head start and
+        the boost cap lifts <em>before</em> the silicon heats. When load actually
+        arrives, RPM is already on target — no impeller inertia, no heatsink soak
+        delay. The mirror trick on the way down: drop the boost cap as soon as load
+        fades, <em>before</em> the curve has to chase a cooling temperature.
+      </span>
+    </li>
+    <li class="hero-layer" data-layer="2">
+      <span class="hero-layer-no">02</span>
+      <span class="hero-layer-name" data-i18n="hero.layer.2.name">Why it works</span>
+      <span class="hero-layer-body" data-i18n-html="hero.layer.2.body">
+        Sub-threshold leakage scales <strong>exponentially</strong> with T — every °C
+        of silicon multiplies static current (Arrhenius-form on the trap-emission rate;
+        Poole-Frenkel under field). A pre-cooled chip on the same workload
+        <em>draws less</em>, <em>heats less</em>, <em>demands less</em> cooling — a
+        self-reinforcing loop. Spinning the fan up <em>before</em> the load arrives =
+        keeping the silicon in its efficient regime instead of climbing the
+        leakage-cliff.
+      </span>
+    </li>
+  </ol>
+
+  <p class="hero-foot">
+    <span class="hero-tag" data-i18n="hero.tag">read-only · P0 pilot · sandbox-first</span>
+    <a class="hero-link" href="https://github.com/zzallirog/coolstep" target="_blank" rel="noopener" data-i18n="hero.link.source">source</a>
+    <span class="hero-sep">·</span>
+    <a class="hero-link" href="/api/discoveries" target="_blank" rel="noopener" data-i18n="hero.link.manifest">signal manifest</a>
+    <span class="hero-sep">·</span>
+    <a class="hero-link" href="/api/calibration" target="_blank" rel="noopener" data-i18n="hero.link.gates">gates</a>
+  </p>
+</section>
+
+<main class="grid spotlight-root" role="main">
+  <live-telemetry-tile     data-tile data-cat="thermal" style="--idx:0"  aria-label="Live telemetry"></live-telemetry-tile>
+  <calibration-state-tile  data-tile data-cat="events"  style="--idx:1"  aria-label="Calibration state"></calibration-state-tile>
+  <sparkline-tile          data-tile data-cat="cooling" style="--idx:2"  aria-label="Trends"></sparkline-tile>
+  <throttle-events-tile    data-tile data-cat="thermal" style="--idx:3"  aria-label="Throttle history"></throttle-events-tile>
+  <incidents-tile          data-tile data-cat="events"  style="--idx:15" aria-label="Incidents"></incidents-tile>
+  <event-segments-tile     data-tile data-cat="events"  style="--idx:16" aria-label="Event segments"></event-segments-tile>
+  <stress-runs-tile        data-tile data-cat="events"  style="--idx:4"  aria-label="Stress runs"></stress-runs-tile>
+  <actuator-history-tile   data-tile data-cat="cooling" style="--idx:5"  aria-label="Actuator history"></actuator-history-tile>
+  <adapters-health-tile    data-tile data-cat="cooling" style="--idx:6"  aria-label="Adapters health"></adapters-health-tile>
+  <reliability-tile        data-tile data-cat="cooling" style="--idx:7"  aria-label="Daemon reliability"></reliability-tile>
+  <drift-tile              data-tile data-cat="events"  style="--idx:8"  aria-label="Model drift"></drift-tile>
+  <efficiency-tile         data-tile data-cat="graph"   style="--idx:9"  aria-label="Thermal efficiency"></efficiency-tile>
+  <neighbours-tile         data-tile data-cat="graph"   style="--idx:10" aria-label="Predictions — neighbours"></neighbours-tile>
+  <predictor-breakdown-tile data-tile data-cat="graph"  style="--idx:11" aria-label="Predictor breakdown"></predictor-breakdown-tile>
+  <training-tile           data-tile data-cat="graph"   style="--idx:12" aria-label="Training"></training-tile>
+  <discovered-signals-tile data-tile data-cat="system"  style="--idx:13" aria-label="Discovered signals"></discovered-signals-tile>
+  <stack-rationale-tile    data-tile data-cat="system"  style="--idx:14" aria-label="Stack rationale"></stack-rationale-tile>
+</main>
+
+<script type="module" src="/static/components/theme-switcher.js"></script>
+<script type="module" src="/static/components/mode-switcher.js"></script>
+<script type="module" src="/static/components/lang-switcher.js"></script>
+<script type="module" src="/static/components/live-telemetry-tile.js"></script>
+<script type="module" src="/static/components/sparkline-tile.js"></script>
+<script type="module" src="/static/components/neighbours-tile.js"></script>
+<script type="module" src="/static/components/predictor-breakdown-tile.js"></script>
+<script type="module" src="/static/components/efficiency-tile.js"></script>
+<script type="module" src="/static/components/drift-tile.js"></script>
+<script type="module" src="/static/components/calibration-state-tile.js"></script>
+<script type="module" src="/static/components/training-tile.js"></script>
+<script type="module" src="/static/components/stack-rationale-tile.js"></script>
+<script type="module" src="/static/components/adapters-health-tile.js"></script>
+<script type="module" src="/static/components/reliability-tile.js"></script>
+<script type="module" src="/static/components/throttle-events-tile.js"></script>
+<script type="module" src="/static/components/incidents-tile.js"></script>
+<script type="module" src="/static/components/event-segments-tile.js"></script>
+<script type="module" src="/static/components/actuator-history-tile.js"></script>
+<script type="module" src="/static/components/stress-runs-tile.js"></script>
+<script type="module" src="/static/components/discovered-signals-tile.js"></script>
+<script type="module" src="/static/pills/profile.js"></script>
+<script type="module" src="/static/instrument.js"></script>
+</body>
+</html>

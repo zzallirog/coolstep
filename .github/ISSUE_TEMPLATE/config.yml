@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions — questions, ideas, show-and-tell
+    url: https://github.com/zzallirog/coolstep/discussions
+    about: "Not sure if it's a bug? Start a discussion first. Faster, friendlier, no template fatigue."
+  - name: 📖 Troubleshooting guide
+    url: https://github.com/zzallirog/coolstep/blob/master/docs/troubleshooting.md
+    about: "Most coolstep compat warnings have a fix here — check before opening an issue."
