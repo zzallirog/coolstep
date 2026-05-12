@@ -7,8 +7,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.1](https://img.shields.io/badge/release-v0.5.1-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.1)
-[![tests](https://img.shields.io/badge/tests-684_passed-brightgreen)](#tested-against)
+[![v0.5.4](https://img.shields.io/badge/release-v0.5.4-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.4)
+[![tests](https://img.shields.io/badge/tests-798_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 
 <picture>
@@ -72,7 +72,34 @@ dashboard is the product; the actuator is the privilege.
 
 → [`docs/calibration-gates.md`](docs/calibration-gates.md)
 
-## 05 · Local and private
+## 05 · Read the cockpit
+
+The predictor cockpit tile makes one promise: every number is paired
+with the parameter that gives it meaning, so the operator never reads
+a naked figure they have to translate in their head.
+
+| where | what it shows | paired with |
+|---|---|---|
+| **LIVE NOW** | latest sample, °C | Δ — predicted change over the +5 s horizon |
+| **TREND** | phrase: `→78° in 6s` · `cooling −10°/21s` · `asymptote eq ≈ 73°` · `past knee` · `steady` | raw dT/dt printed underneath for the operator who wants the °C/s anyway |
+| **Canvas** | past 30 s actual (gold trail) overlaid with forecast +5 s (dashed cool) | σ-corridor shaded around the forecast, 78 °C knee + 90 °C danger as dashed reference lines |
+| **Past predictions** | hollow rings where we said the chip would land | thin segment to where it actually did, coloured by \|residual\| (≤ 2° / 2–5° / > 5°) |
+| **⚡ Spike chip** | visible when the predictor was surprised: \|residual\| ≥ 5 °C for 2 consecutive ticks | duration · max \|residual\| · workload label; closure writes an `Incident(kind="predictor_spike")` so future zen / Steam / speedtest fingerprints get recognised |
+| **±err 15 M / 30 S** | twin pill — slow rolling quality vs what this workload is doing right now | same colour ladder, so the split reads as "long-haul fine, transient spike" at a glance |
+
+The math underneath is intentionally pedestrian. Newton-cooling
+saturation through `T₀ + s·τ·(1 − e^(−h/τ))` for the +5 s forecast,
+a Bayesian shrinkage prior on the per-bucket residual correction so
+two agreeing samples don't report σ = 0.01 °C confidence, one OLS
+slope over the last five frames for the live dT/dt readout. Stdlib
+only, no scipy. The forecast curve anchors on the meta-corrected
+endpoint so the dashed line and the predicted ring agree — operator
+never sees "line shoots to 91°, ring sits at 85°".
+
+→ [`docs/stack-decisions.md`](docs/stack-decisions.md) (ADR-020, ADR-021) ·
+screenshots in [v0.5.4 release notes](https://github.com/zzallirog/coolstep/releases/tag/v0.5.4)
+
+## 06 · Local and private
 
 Nothing leaves the host. No model upload, no telemetry, no cloud sync.
 Thermal data correlates with what you're doing — your apps, your
@@ -81,7 +108,7 @@ on disk where it belongs.
 
 → [`docs/stack-decisions.md`](docs/stack-decisions.md) (ADR-008)
 
-## 06 · Tested against
+## 07 · Tested against
 
 <a name="tested-against"></a>
 
@@ -155,7 +182,7 @@ with system Python packages. Easy to upgrade
 **Expected output.** A progress bar, then:
 
 ```
-  installed package coolstep 0.5.1, installed using Python 3.12+
+  installed package coolstep 0.5.4, installed using Python 3.12+
   These apps are now available:
     - coolstep
     - coolstep-collector
@@ -191,7 +218,7 @@ keeps the install in `~/.local/` and never touches system packages.
 **Expected output.** Standard pip output, ending in:
 
 ```
-Successfully installed coolstep-0.5.0
+Successfully installed coolstep-0.5.4
 ```
 
 ---
@@ -285,6 +312,8 @@ override — and even then, only after the eight calibration gates
 | P1 — calibration window, throttle FSM, audit closure | ✅ |
 | P2 — actuator stack with sandbox-first defaults | ✅ |
 | P2.5 — perf and ML/control hardening | ✅ |
+| P2.6 — predictor cockpit relational metrics + 30 s err chip | ✅ v0.5.4 |
+| P2.7 — spike-driven training archive (detector + incident plumbing) | ✅ v0.5.4 (chroma backfill pending) |
 | **P3 — two deployment targets, three-layer manifest, community pointers** | **✅ v0.5.0** |
 | P3.1 — dashboard target-aware tile reordering | ⚪ |
 | P3.2 — `coolstep manifest update` (community feed sync) | ⚪ |
