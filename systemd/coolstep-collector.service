@@ -1,0 +1,50 @@
+[Unit]
+Description=coolstep collector daemon — predictive soft-cooling telemetry
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# PATH covers the three supported install methods:
+#   ~/.local/bin               — pipx shim, pip --user, uv tool install
+#   ~/.local/share/pipx/venvs/coolstep/bin  — direct pipx venv (defensive)
+#   /usr/local/bin, /usr/bin   — AUR / system package install
+# /usr/bin/env handles the lookup so we don't hard-code any one venv path.
+# Maintainer's dev setup (.venv inside ~/coolstep/) can override via a
+# drop-in: ~/.config/systemd/user/coolstep-collector.service.d/dev.conf
+Environment=PATH=%h/.local/bin:%h/.local/share/pipx/venvs/coolstep/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env coolstep-collector --period 1.0 --log-level INFO
+Restart=on-failure
+RestartSec=5
+
+# resource budget per docs/architecture.md
+# MemoryMax bumped 200M → 512M (2026-05-11): после 31h calibration cgroup
+# memory.events.max = 868608 (~7.7 hits/sec) — собранный ring + ChromaDB
+# query path работал ровно на пределе 200M, swap peak 307M. Dashboard
+# подняли до 768M ещё 2026-05-08 по такому же синдрому (см. systemd/CLAUDE.md).
+# Collector workload легче чем у dashboard (нет SSE fan-out), 512M = 2× от
+# реального peak.
+MemoryMax=512M
+CPUQuota=10%
+Nice=10
+IOSchedulingClass=idle
+
+# coolstep is observation-only in P0; no privileged caps needed
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/coolstep/data
+PrivateTmp=true
+
+Environment=COOLSTEP_HOME=%h/coolstep/data
+Environment=PYTHONUNBUFFERED=1
+
+# P2.1 belt-and-braces: SIGKILL / OOM (Python finally не выполнится) →
+# coolstep-cleanup.sh читает runtime-state.json и revertит ТОЛЬКО когда
+# armed_actions непуст. Иначе no-op — не стираем пользовательский кастомный
+# asusctl fan-curve (quietify-mid и т.п.) при штатных рестартах.
+# `-` префикс = ignore exit code.
+ExecStopPost=-%h/coolstep/systemd/coolstep-cleanup.sh
+
+[Install]
+WantedBy=default.target

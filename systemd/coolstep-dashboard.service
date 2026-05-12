@@ -1,0 +1,34 @@
+[Unit]
+Description=coolstep dashboard — FastAPI + SSE
+After=coolstep-collector.service
+Wants=coolstep-collector.service
+
+[Service]
+Type=simple
+# See coolstep-collector.service for PATH rationale (pipx/pip/AUR coverage).
+Environment=PATH=%h/.local/bin:%h/.local/share/pipx/venvs/coolstep/bin:/usr/local/bin:/usr/bin
+ExecStart=/usr/bin/env coolstep-dashboard --host 127.0.0.1 --port 18889
+Restart=on-failure
+RestartSec=5
+
+# MemoryMax=768M — calibrated 2026-05-08 after 1h+ uptime hit cgroup high
+# 24050× under MemoryHigh=400M (SSE/REST stalled in reclaim). 14d telemetry ring +
+# Lit-tile fan-out + SSE buffers settle around 300-450MB; 768M leaves headroom
+# for spikes without flapping. Older 200M caused OOM-pressure flapping under
+# real load. See systemd/CLAUDE.md for full calibration history.
+MemoryMax=768M
+# CPUQuota raised to 30% on 2026-05-12: doctor /api/health timeouts on 10%
+# under busy SSE + sqlite load (queue stalls for 9+ s waiting on 100ms/s budget).
+CPUQuota=30%
+Nice=10
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/coolstep/data
+
+Environment=COOLSTEP_HOME=%h/coolstep/data
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,48 @@
+name: ✨ Feature / enhancement
+description: "Idea for a new collector, actuator, dashboard tile, or CLI flag."
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope reminder — coolstep accepts features that serve one of the
+        two deployment targets (Desktop responsiveness or Server foresight).
+        Features outside that scope are kindly declined; see
+        [CONTRIBUTING.md](https://github.com/zzallirog/coolstep/blob/master/CONTRIBUTING.md)
+        for examples.
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Which deployment target does this serve?
+      options:
+        - "Desktop — laptop/NUC/workstation responsiveness"
+        - "Server — rack/homelab foresight"
+        - "Both"
+        - "Cross-cutting (CLI, dashboard chrome, docs)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: "What's the user pain this addresses? Concrete scenario beats abstract description."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: "Sketch the interface. New CLI flag? New tile? New collector? Don't worry about implementation detail."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: "What else could solve the same problem? Why is this the right one?"
+    validations:
+      required: false
