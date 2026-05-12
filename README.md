@@ -78,14 +78,37 @@ The predictor cockpit tile makes one promise: every number is paired
 with the parameter that gives it meaning, so the operator never reads
 a naked figure they have to translate in their head.
 
+<p align="center">
+  <img src="docs/img/cockpit-v0.5.5/00-full.png" alt="Predictor cockpit — full tile" width="100%">
+</p>
+
+<table>
+<tr>
+<td width="33%"><img src="docs/img/cockpit-v0.5.5/01-header-chips.png" alt="Spike chip + dual err pills"></td>
+<td width="33%"><img src="docs/img/cockpit-v0.5.5/02-hero.png" alt="LIVE NOW · TREND · Δ in +5s"></td>
+<td width="33%"><img src="docs/img/cockpit-v0.5.5/04-bucket-strip.png" alt="Profile · correction · σ · bucket meta"></td>
+</tr>
+<tr>
+<td><sub><b>Header:</b> ⚡ spike-active badge with workload label · twin <code>±err</code> chip (15 m slow / 30 s fast)</sub></td>
+<td><sub><b>Hero:</b> live °C paired with Δ over +5 s · trend phrase paired with raw <code>dT/dt</code></sub></td>
+<td><sub><b>Bucket strip:</b> meta correction + σ + sample-count <code>n</code> · shrinkage prior visibly widens σ on young buckets</sub></td>
+</tr>
+</table>
+
 | where | what it shows | paired with |
 |---|---|---|
 | **LIVE NOW** | latest sample, °C | Δ — predicted change over the +5 s horizon |
-| **TREND** | phrase: `→78° in 6s` · `cooling −10°/21s` · `asymptote eq ≈ 73°` · `past knee` · `steady` | raw dT/dt printed underneath for the operator who wants the °C/s anyway |
+| **TREND** | phrase: `→78° in 6s` · `cooling −10°/21s` · `asymptote eq ≈ 76°` · `past knee` · `steady` | raw dT/dt printed underneath for the operator who wants the °C/s anyway |
 | **Canvas** | past 30 s actual (gold trail) overlaid with forecast +5 s (dashed cool) | σ-corridor shaded around the forecast, 78 °C knee + 90 °C danger as dashed reference lines |
 | **Past predictions** | hollow rings where we said the chip would land | thin segment to where it actually did, coloured by \|residual\| (≤ 2° / 2–5° / > 5°) |
 | **⚡ Spike chip** | visible when the predictor was surprised: \|residual\| ≥ 5 °C for 2 consecutive ticks | duration · max \|residual\| · workload label; closure writes an `Incident(kind="predictor_spike")` so future zen / Steam / speedtest fingerprints get recognised |
 | **±err 15 M / 30 S** | twin pill — slow rolling quality vs what this workload is doing right now | same colour ladder, so the split reads as "long-haul fine, transient spike" at a glance |
+
+<p align="center">
+  <img src="docs/img/cockpit-v0.5.5/03-canvas-rings.png" alt="Canvas detail — ghost rings + σ-corridor + knee/danger references" width="80%">
+  <br>
+  <sub><i>Canvas detail — gold actual trail descends from a past plateau; hollow rings mark where we previously said it would land, with thin segments to where it actually did (red = miss > 5°). Forecast at <code>now</code> sits inside the σ-corridor; the knee reference line is the dashed band cutting horizontally across.</i></sub>
+</p>
 
 The math underneath is intentionally pedestrian. Newton-cooling
 saturation through `T₀ + s·τ·(1 − e^(−h/τ))` for the +5 s forecast,
@@ -97,7 +120,8 @@ endpoint so the dashed line and the predicted ring agree — operator
 never sees "line shoots to 91°, ring sits at 85°".
 
 → [`docs/stack-decisions.md`](docs/stack-decisions.md) (ADR-020, ADR-021) ·
-screenshots in [v0.5.4 release notes](https://github.com/zzallirog/coolstep/releases/tag/v0.5.4)
+screenshots in [v0.5.4](https://github.com/zzallirog/coolstep/releases/tag/v0.5.4)
++ [v0.5.5](https://github.com/zzallirog/coolstep/releases/tag/v0.5.5) release notes
 
 ## 06 · Local and private
 

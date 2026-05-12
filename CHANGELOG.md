@@ -8,6 +8,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-05-12
+
+Documentation + visual refresh on top of v0.5.4.  No runtime behaviour
+change.
+
+### Added
+
+- **`docs/img/cockpit-v0.5.5/`** — five fresh cockpit screenshots
+  captured live during a stress burst:
+    - `00-full.png` — full cockpit at *asymptote* state (`+1.7°C in +5s`,
+      trend phrase `asymptote eq ≈ 76°`, bucket `n=5` with shrinkage-
+      wide σ=2.78°C)
+    - `01-header-chips.png` — ⚡ spike-active chip + twin `±err` pills
+    - `02-hero.png` — hero block with LIVE NOW / Δ / TREND / dT/dt
+    - `03-canvas-rings.png` — canvas zoom showing past-prediction
+      rings, σ-corridor, knee/danger reference lines
+    - `04-bucket-strip.png` — meta correction + σ + sample-count `n`,
+      with the shrinkage prior visibly widening σ on a young bucket
+- README section "05 · Read the cockpit" gains an inline visual
+  layout: full-width hero shot at section open, 3-column row of
+  detail crops with sub-captions, canvas zoom-in below the components
+  table.  Replaces the prose `→ release notes` pointer that previously
+  carried the visual weight alone.
+
+### Changed
+
+- README "TREND phrase" examples updated to include `asymptote eq ≈ 76°`
+  (the most informative branch — it's how the cockpit signals
+  "rising but won't reach the knee at this slope").
+
 ## [0.5.4] — 2026-05-12
 
 Predictor cockpit becomes a relational instrument: every metric is
