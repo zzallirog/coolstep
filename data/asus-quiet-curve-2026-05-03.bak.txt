@@ -1,0 +1,17 @@
+
+Fan curves for Quiet
+
+[
+    (
+        fan: CPU,
+        pwm: (5, 22, 38, 45, 56, 63, 81, 81),
+        temp: (60, 63, 66, 69, 72, 75, 78, 78),
+        enabled: false,
+    ),
+    (
+        fan: GPU,
+        pwm: (5, 20, 38, 43, 56, 66, 84, 84),
+        temp: (58, 60, 63, 65, 67, 70, 72, 72),
+        enabled: false,
+    ),
+]

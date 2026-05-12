@@ -1,0 +1,76 @@
+# Runtime data — never commit, see docs/incident-2026-05-04-chroma-bloat.md
+# (Recurrence 2026-05-10: link_lists.bin / chroma.sqlite3 / ml-state.json
+#  попадали в auto-commits → .git разрос до 7.6 GiB; история переписана
+#  через git filter-repo, эти patterns — first line of defense.)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/*.sqlite
+data/*.sqlite3
+data/*.sqlite3-journal
+data/*.sqlite3-wal
+data/*.sqlite3-shm
+data/exports/
+
+# ChromaDB persist dir (HNSW link_lists.bin, data_level0.bin, sqlite — всё runtime)
+data/chroma/
+data/chroma.bak*/
+
+# ML state / training history
+data/ml-state.json
+data/drift-history.jsonl
+
+# Runtime jsonl (rotating, append-only, growing fast)
+data/decisions.jsonl
+data/decisions.jsonl.*
+data/actuator-journal.jsonl
+data/actuator-journal.jsonl.*
+data/incidents.jsonl
+data/runtime-state.json
+data/asusctl_fan_curve_baseline.json
+data/telemetry.jsonl
+data/telemetry.jsonl.*
+
+# Belt-and-suspenders: бинарные runtime под data/ нигде не должны commit'иться
+data/**/*.bin
+data/**/*.pickle
+data/**/*.parquet
+data/**/*.npy
+data/**/*.npz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Frontend build artifacts (Lit)
+dashboard/static/dist/
+node_modules/
+
+# Stress-test run artefacts (bench/runs/.gitkeep is tracked; run dirs are not)
+bench/runs/*
+!bench/runs/.gitkeep
+
+# Filter-repo backups
+.git.bak.*/
+
+
+# Claude Code agent worktrees + session state (never publish)
+.claude/
