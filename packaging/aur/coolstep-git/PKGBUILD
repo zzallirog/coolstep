@@ -1,0 +1,89 @@
+# Maintainer: zzalli <github.com/zzalli>
+pkgname=coolstep-git
+_pkgname=coolstep
+pkgver=0.5.0.r0.gHEAD
+pkgrel=1
+pkgdesc="Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard (git/master)"
+arch=('any')
+url="https://github.com/zzalli/coolstep"
+license=('MIT')
+
+depends=(
+  'python>=3.12'
+  'python-fastapi'
+  'uvicorn'
+  'python-pydantic'
+  'python-click'
+  'python-psutil'
+)
+
+optdepends=(
+  # Workstation/laptop opora
+  'asusctl: ASUS TUF/ROG fan curves + AURA actuator'
+  'ryzenadj: AMD STAPM / fast-PPT / slow-PPT actuator'
+  'power-profiles-daemon: laptop power orchestration'
+  'lm_sensors: hwmon driver discovery + fancontrol fallback'
+
+  # Server opora
+  'ipmitool: rack server BMC sensor read'
+  'freeipmi: alternative IPMI client'
+
+  # eBPF / perf observability
+  'bpftrace: kernel scheduler events (pre-thermal load signal)'
+  'perf: PMU counters (cycles / instructions / cache-miss)'
+
+  # GPU runtime libs (lazy-loaded by collectors)
+  'nvidia-utils: NVIDIA GPU telemetry via NVML'
+  'python-pynvml: NVIDIA management library Python bindings'
+  'intel-gpu-tools: Intel iGPU monitoring helpers (intel_gpu_top)'
+)
+
+makedepends=(
+  'git'
+  'python-build'
+  'python-installer'
+  'python-setuptools'
+  'python-wheel'
+)
+
+source=("$_pkgname::git+https://github.com/zzalli/coolstep.git")
+sha256sums=('SKIP')
+
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+
+pkgver() {
+  cd "$_pkgname"
+  printf "0.5.0.r%s.g%s" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$_pkgname"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$_pkgname"
+  # Skip daemon test (Chroma SEGV — known, masked via COOLSTEP_CHROMA_DISABLED)
+  PYTHONDONTWRITEBYTECODE=1 \
+    # Failing tests now fail the build. test_daemon.py is excluded because
+    # chromadb-rust-bindings segfaults on Python 3.14; see docs/troubleshooting.md.
+    PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
+}
+
+package() {
+  cd "$_pkgname"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/p3-plan.md "$pkgdir/usr/share/doc/$pkgname/p3-plan.md"
+
+  # Systemd user units (so users can `systemctl --user enable coolstep-collector`)
+  install -Dm644 systemd/coolstep-collector.service "$pkgdir/usr/lib/systemd/user/coolstep-collector.service"
+  install -Dm644 systemd/coolstep-dashboard.service "$pkgdir/usr/lib/systemd/user/coolstep-dashboard.service"
+
+  # Community manifest dir (L1 layer) — empty by default, ready for `coolstep manifest update`
+  install -dm755 "$pkgdir/usr/share/coolstep"
+}

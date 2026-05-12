@@ -1,0 +1,60 @@
+name: 🔌 Hardware support — driver/chip not recognized
+description: "coolstep compat doesn't see your fan controller, GPU, or sensor."
+labels: ["hardware-support", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Hardware support is mostly a JSON change in
+        [`coolstep/compat/core.json`](https://github.com/zzallirog/coolstep/blob/master/coolstep/compat/core.json) — one chip per entry.
+        Most additions take less than 24 h to merge once we know the
+        exact driver name and what it exposes.
+
+  - type: dropdown
+    id: hardware-type
+    attributes:
+      label: What kind of hardware?
+      options:
+        - "Motherboard / Super-I/O fan controller (nct, it87, f71, w83, asus-ec, …)"
+        - "GPU not detected (AMD / NVIDIA / Intel)"
+        - "RAPL / energy counter on a non-standard CPU"
+        - "BMC (Redfish or IPMI quirks)"
+        - "ARM SoC thermal zone with unknown name"
+        - "Other (describe below)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: lspci-or-dmi
+    attributes:
+      label: Hardware identification
+      description: "`lspci -nn | grep -i vga` for GPUs; `cat /sys/class/dmi/id/{product_name,sys_vendor}` for motherboards; `cat /proc/cpuinfo | head -20` for CPUs."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: hwmon
+    attributes:
+      label: hwmon enumeration
+      description: "Output of `for h in /sys/class/hwmon/hwmon*; do echo -n \"$h: \"; cat $h/name; done`"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: compat
+    attributes:
+      label: "`coolstep compat --json` output"
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: driver
+    attributes:
+      label: "Known working driver / kmod (if any)"
+      description: "e.g. `nct6687-driver-dkms-git`, `asus-wmi-sensors-dkms-git`. URL to upstream if unusual."
+      placeholder: "https://github.com/Fred78290/nct6687d"
+    validations:
+      required: false
