@@ -8,6 +8,95 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-05-13
+
+Audit hotfix for v0.5.9.  Ten bugs surfaced by the post-release code
+review — four in the embedder-refit / store concurrency layer, three
+in the dashboard hot path, two in the cutover / rollback scripts, one
+display-layer plumbing regression.  No new features; pure correctness
++ atomicity tightening on top of the v0.5.9 HNSW cutover.
+
+### Fixed
+
+- **`embedder_refit.refit_and_swap` hard-gated against `ChromaStore`.**
+  The daemon calls the refit with `self.chroma`, which is whichever
+  store `COOLSTEP_KNN_BACKEND` selected — default is `ChromaStore`.
+  The swap path renames `persist_dir` to `hnsw.backup` and replaces
+  it with an HNSW-shaped staging directory; running against
+  `ChromaStore` would silently relabel the live chroma collection as
+  an "hnsw backup" and leave the daemon with an HNSW directory it
+  can't query through Chroma's API.  Refuses loudly now.  Negative-
+  check (block `ChromaStore`) rather than positive (allow only
+  `HnswStore`) so duck-typed test doubles continue to work.
+- **Post-swap reload of the live `HnswStore`.**  Previously the in-
+  memory `_index` and sqlite handle still pointed at the renamed-away
+  `hnsw.backup/` directory after a successful swap.  Reads silently
+  served from the old in-memory index until the next daemon restart;
+  writes went to a sqlite file at a path the operator could not see
+  in the new live dir.  Now: `close()` the live store before renaming,
+  `discover()` after — under the store's own lock.
+- **Partial-rmtree refusal.**  If `shutil.rmtree(live_backup,
+  ignore_errors=True)` left the backup directory partially intact
+  (perms, dirty inode, mount point), the subsequent rename of the
+  live directory to `hnsw.backup` raised `ENOTEMPTY` mid-swap and
+  left both directories present.  Now we detect the leftover after
+  rmtree and return a skip with `backup_cleanup_failed:<path>` rather
+  than half-swap.
+- **`Store` read methods hold the writer lock.**  `count_frames`,
+  `count_throttle_events`, `count_throttle_events_since`,
+  `coverage_seconds`, and `latest_frame_row` were calling
+  `self._conn.execute(...)` without acquiring `self._lock`.  v0.5.9
+  added `asyncio.to_thread` paths that schedule these on worker
+  threads concurrently with the writer's `rotate()` and
+  `write_frame`, producing `sqlite3.ProgrammingError` under load.
+  All five now acquire the lock around the cursor.
+- **`/api/predictor-cockpit` runs in `asyncio.to_thread`.**  The
+  hottest endpoint on the dashboard (2 Hz from each cockpit tile)
+  was the only one still doing synchronous sqlite + `residual_log.
+  tail()` on the event loop — undoing the very perf rationale the
+  cache+offload changes in v0.5.9 were written for.  Body extracted
+  into a sync helper, wrapped in `await asyncio.to_thread`.
+- **sqlite connection leaked in the cockpit handler.**  `_open_db()`
+  opened a connection inside the try-block and never closed it on
+  the success path.  Long-running browser sessions accumulated file
+  descriptors at one-per-poll.  `try/finally: db.close()` restored.
+- **Atomic write for `runtime-state.json` and `ml-state.json`.**
+  `path.write_text(json.dumps(...))` is open-truncate-write — a
+  daemon polling either file at tick boundaries could read a
+  half-written prefix and hit `JSONDecodeError`.  Both writers now
+  go through `path.with_name(... + ".tmp"); os.replace(tmp, path)`.
+  POSIX rename is atomic on the same filesystem; readers see either
+  the old snapshot or the new one, never a partial one.
+- **`cutover_to_hnsw.sh` rolls back the data-dir backup on failure.**
+  The script renamed `data/hnsw/` to `data/hnsw.bak-STAMP` before
+  invoking the reindexer.  If the reindexer crashed (^C, OOM, daemon
+  restart, kernel panic), the live data directory was gone and there
+  was no recovery — the partnered `hnsw_rollback.sh` only renamed
+  the systemd drop-in.  An `ERR` trap now restores the timestamped
+  backup; the `--duration` arg parser also gained a missing-value
+  guard so `--duration` at end-of-args fails loudly instead of
+  silently consuming the next flag.
+- **`hnsw_rollback.sh` gained `--restore-data`.**  When rollback is
+  triggered by HNSW data corruption (rather than drop-in misbehavior),
+  renaming only the drop-in left the daemon falling back to a still-
+  corrupt directory.  The new flag picks the newest `data/hnsw.bak-*`
+  from `cutover_to_hnsw.sh`, archives the failed live dir to
+  `data/hnsw.failed-STAMP`, and puts the backup back in place.
+- **Cockpit scope toggle cancels the periodic timer before refetch.**
+  Rapid 30 → 60 → 120 s clicks fired three overlapping `_refresh`
+  calls; whichever HTTP response arrived last won the visible scope
+  regardless of click order (operator saw stale scope after fast
+  toggles).  `_setScope` now clears the pending `setTimeout` and
+  re-arms the loop via `_scheduleRefresh(0)`, single in-flight at a
+  time.
+- **`MetaPredictor.predict` forwards `neighbours` / `danger_neighbour_
+  count` / `suggested_rpm` from the wrapped `KnnPredictor`.**  v0.5.9
+  silently dropped them on the floor — the dashboard's neighbours
+  panel rendered empty, `recent_throttle_bump` had no
+  `suggested_rpm` source, and the spike detector's danger-vector
+  branch never triggered.  Three keyword args plumbed through
+  unchanged.
+
 ## [0.5.9] — 2026-05-13
 
 HNSW cutover + adaptive pipeline.  ChromaDB's tenant SEGV under load

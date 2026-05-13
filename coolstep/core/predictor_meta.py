@@ -108,6 +108,12 @@ class MetaPredictor:
         composed_conf = compose_confidence(base_pred.confidence, bucket_certainty)
 
         key = bucket_of(features)
+        # Forward the KNN-supplied fields verbatim — the dashboard's
+        # neighbours panel, the curve's `recent_throttle_bump` policy and
+        # the spike-detector's danger-vector heuristic all read these off
+        # the meta-wrapped Prediction.  Dropping them (the original v0.5.9
+        # cut) silently zeroed the dashboard's neighbour list and reverted
+        # suggested_rpm to None for every host.
         return Prediction(
             horizon_sec=base_pred.horizon_sec,
             throttle_prob=base_pred.throttle_prob,
@@ -119,6 +125,9 @@ class MetaPredictor:
                 f"{base_pred.reason} | meta-correction {correction:+.2f}°C "
                 f"(σ={std:.2f}, n={n_samples}, bucket={key})"
             ),
+            neighbours=base_pred.neighbours,
+            danger_neighbour_count=base_pred.danger_neighbour_count,
+            suggested_rpm=base_pred.suggested_rpm,
         )
 
     def bucket(self, features: dict[str, float]) -> BucketKey:

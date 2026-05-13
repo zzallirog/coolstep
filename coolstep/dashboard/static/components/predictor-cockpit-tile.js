@@ -596,8 +596,14 @@ export class PredictorCockpitTile extends LitElement {
     try { localStorage.setItem(PredictorCockpitTile.SCOPE_STORAGE_KEY, String(s)); }
     catch (_) { /* no-op */ }
     // Scope change → refetch + redraw (server bins residuals by scope).
+    // Cancel the pending periodic timer before kicking the immediate
+    // refresh: otherwise a fast 30→60→120 click sequence fires three
+    // fetches with overlapping in-flight times, and whichever resolves
+    // last wins state regardless of click order (operator sees stale
+    // scope after rapid toggles).  _scheduleRefresh re-arms the loop.
     this._lastDrawSig = null;
-    this._refresh().then(() => this._draw());
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._scheduleRefresh(0);
   }
 
   /* Resolve the predicted temperature for the active horizon — prefers

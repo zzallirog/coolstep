@@ -450,19 +450,26 @@ def create_app() -> FastAPI:
 
         See ADR-018.  This endpoint is read-only; all state lives in
         ml-state.json + residual-state.jsonl + sqlite frames.
-        """
-        import time as _time
 
+        v0.5.10: the entire body runs in `asyncio.to_thread` — earlier
+        revisions did sync sqlite + tail() directly on the event loop,
+        which serialised all other dashboard handlers behind the
+        residual-log walk under load.  See P2.9.6 phase 2 rationale.
+        """
+        body, status = await asyncio.to_thread(_predictor_cockpit_sync, scope_s)
+        return JSONResponse(body, status_code=status)
+
+    def _predictor_cockpit_sync(scope_s: int) -> tuple[dict, int]:
         path = _ml_state_path()
         if not path.exists():
-            return JSONResponse({"error": "no ml-state"}, status_code=404)
+            return {"error": "no ml-state"}, 404
         try:
             m = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            return {"error": str(exc)}, 500
 
         features = m.get("features", {}) or {}
-        now = _time.time()
+        now = time.time()
 
         # Past 60s temperature trail from sqlite frames table. The
         # visible canvas window is ~38s (T_PAST = max(30, horizon+8));
@@ -471,6 +478,7 @@ def create_app() -> FastAPI:
         # between 2 s polls (P2.9.8, operator: «график едет», 2026-05-13).
         # Cost: ~300 floats (60s × 5Hz) per response, negligible.
         actual_trail: list[dict[str, float]] = []
+        db = None
         try:
             db = _open_db()
             since = now - 60.0
@@ -486,6 +494,12 @@ def create_app() -> FastAPI:
             ]
         except Exception:  # noqa: BLE001
             actual_trail = []
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         # Residual trail — validated predictions across the canvas window
         # (2026-05-13: prior `tail(12)` packed 12 records from a 2.4s slice
@@ -629,7 +643,7 @@ def create_app() -> FastAPI:
             "age_sec": round(now - float(m.get("ts") or now), 1),
         }
 
-        return JSONResponse({
+        return {
             "current": current,
             "actual_trail": actual_trail,
             "residual_trail": residual_trail,
@@ -651,7 +665,7 @@ def create_app() -> FastAPI:
             "trust_mode": m.get("trust_mode", "prior"),
             "trust_n": m.get("trust_n", 0),
             "scope_s": max(10, min(600, int(scope_s))),
-        })
+        }, 200
 
     @app.get("/api/throttle-events")
     async def throttle_events(since: str = "7d", limit: int = 200) -> JSONResponse:
@@ -967,7 +981,14 @@ def create_app() -> FastAPI:
             data["mode"] = target
             data["mode_set_at"] = time.time()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2))
+            # Atomic write: daemon polls this file every tick — a torn
+            # `write_text` (open-truncate-write) interleaved with a read
+            # raises JSONDecodeError and the daemon reverts the mode.
+            # tmp + os.replace gives readers either the old or the new
+            # bytes, never half of each.
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, path)
         except OSError as exc:
             return JSONResponse(
                 {"error": "persist failed", "detail": type(exc).__name__},

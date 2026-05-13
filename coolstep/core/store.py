@@ -147,12 +147,14 @@ class Store:
             self._conn.commit()
 
     def count_frames(self) -> int:
-        cur = self._conn.execute("SELECT COUNT(*) FROM frames")
-        return int(cur.fetchone()[0])
+        with self._lock:
+            cur = self._conn.execute("SELECT COUNT(*) FROM frames")
+            return int(cur.fetchone()[0])
 
     def count_throttle_events(self) -> int:
-        cur = self._conn.execute("SELECT COUNT(*) FROM throttle_events")
-        return int(cur.fetchone()[0])
+        with self._lock:
+            cur = self._conn.execute("SELECT COUNT(*) FROM throttle_events")
+            return int(cur.fetchone()[0])
 
     def count_throttle_events_since(self, ts_floor: float) -> int:
         """Throttle events whose `ts_start` is at or after `ts_floor`.
@@ -160,25 +162,28 @@ class Store:
         Used by the daemon's adaptive curve to detect a recently-hot
         chip and add a small persistent fan-curve boost via the
         `recent_throttle_bump` policy."""
-        cur = self._conn.execute(
-            "SELECT COUNT(*) FROM throttle_events WHERE ts_start >= ?",
-            (float(ts_floor),),
-        )
-        return int(cur.fetchone()[0])
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COUNT(*) FROM throttle_events WHERE ts_start >= ?",
+                (float(ts_floor),),
+            )
+            return int(cur.fetchone()[0])
 
     def coverage_seconds(self) -> float:
-        cur = self._conn.execute("SELECT MIN(ts), MAX(ts) FROM frames")
-        row = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute("SELECT MIN(ts), MAX(ts) FROM frames")
+            row = cur.fetchone()
         if row[0] is None or row[1] is None:
             return 0.0
         return float(row[1]) - float(row[0])
 
     def latest_frame_row(self) -> dict[str, object] | None:
-        cur = self._conn.execute(
-            "SELECT ts, cpu_temp, cpu_power, gpu_temp, gpu_power, fan_max_rpm, "
-            "workload_label FROM frames ORDER BY ts DESC LIMIT 1"
-        )
-        row = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT ts, cpu_temp, cpu_power, gpu_temp, gpu_power, fan_max_rpm, "
+                "workload_label FROM frames ORDER BY ts DESC LIMIT 1"
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         cols = (

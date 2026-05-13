@@ -204,6 +204,25 @@ def refit_and_swap(  # noqa: C901 (linear pipeline — splitting would hurt read
         _append_log(refit_log_path, report)
         return report
 
+    # Hard gate: the swap path (rename live dir → hnsw.backup, replace with
+    # hnsw-shaped staging) is ONLY safe against an HnswStore. ChromaStore
+    # has a `persist_dir` attr too — passing it here would silently rename
+    # the chroma collection out from under the running daemon and replace
+    # it with an HNSW directory tree. v0.5.9 backend selector dispatches
+    # based on COOLSTEP_KNN_BACKEND, so the daemon doesn't know which
+    # store it has when calling us. Negative-check rather than positive-
+    # isinstance so duck-typed test fakes don't trigger the gate.
+    try:
+        from coolstep.adapters.storage.chroma import ChromaStore as _ChromaStore
+    except ImportError:  # chromadb optional dep absent — nothing to guard against
+        _ChromaStore = None  # type: ignore[assignment]
+    if _ChromaStore is not None and isinstance(hnsw_store, _ChromaStore):
+        log.warning(
+            "embedder_refit: skipping — store is ChromaStore; refit_and_swap "
+            "only supports HnswStore (set COOLSTEP_KNN_BACKEND=hnsw)"
+        )
+        return _skip("unsupported_store_ChromaStore")
+
     # Guard: predictor_spike open.
     if spike_active:
         log.info("embedder_refit: skipping — predictor_spike episode open")
@@ -358,10 +377,28 @@ def refit_and_swap(  # noqa: C901 (linear pipeline — splitting would hurt read
     # wrong path.
     live_dir = hnsw_store.persist_dir
     live_backup = live_dir.parent / "hnsw.backup"
+    # If a previous rmtree was interrupted (perms, mount, etc.) live_backup
+    # may still exist after the call — refuse to proceed rather than blast
+    # ahead with a half-swap that leaves both live and backup present.
     shutil.rmtree(live_backup, ignore_errors=True)
+    if live_backup.exists():
+        return _skip(f"backup_cleanup_failed:{live_backup}")
+    # Close the live store BEFORE renaming its directory out from under it:
+    # otherwise after the swap the in-memory `_index` and sqlite handle
+    # still point at the renamed-away backup dir, and subsequent reads/
+    # writes go to the wrong place silently.
+    with hnsw_store._lock:  # noqa: SLF001
+        hnsw_store.close()
     if live_dir.exists():
         live_dir.rename(live_backup)
     staging_dir.rename(live_dir)
+    # Re-discover so the in-memory state binds to the freshly-renamed dir.
+    if not hnsw_store.discover():
+        log.error(
+            "embedder_refit: post-swap discover() failed; backup at %s",
+            live_backup,
+        )
+        return _skip("post_swap_discover_failed")
     log.info(
         "embedder_refit: atomic swap done — %d vectors in new index (backup: %s)",
         added, live_backup,

@@ -1880,7 +1880,14 @@ class Daemon:
         # the serialiser CPU time; compact form cuts both ~half. The file
         # is consumed exclusively by other Python processes (dashboard,
         # tooling) — none of which need it pretty.
-        self.ml_state_path.write_text(json.dumps(snapshot, separators=(",", ":")))
+        # Atomic write: dashboard polls this file at ~5 Hz; a torn read
+        # surfaced to the operator as cockpit-tile 500s during the open-
+        # truncate-write window.  Write to a sibling .tmp + os.replace
+        # gives readers either the old snapshot or the new one, never a
+        # half-flushed prefix. POSIX rename is atomic on the same fs.
+        tmp_path = self.ml_state_path.with_name(self.ml_state_path.name + ".tmp")
+        tmp_path.write_text(json.dumps(snapshot, separators=(",", ":")))
+        os.replace(tmp_path, self.ml_state_path)
 
 
 @click.command()

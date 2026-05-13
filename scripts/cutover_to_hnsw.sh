@@ -18,6 +18,7 @@ HNSW_DATA="${REPO}/data/hnsw"
 DRY_RUN=0
 SKIP_MIGRATE=0
 WATCH_DURATION=60
+HNSW_BACKUP=""   # set when we rename live → .bak-STAMP, consumed by trap
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -26,6 +27,9 @@ while [ $# -gt 0 ]; do
         --skip-migrate)
             SKIP_MIGRATE=1; shift ;;
         --duration)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --duration requires a value" >&2; exit 1
+            fi
             WATCH_DURATION="$2"; shift 2 ;;
         *)
             echo "Unknown arg: $1" >&2
@@ -33,6 +37,21 @@ while [ $# -gt 0 ]; do
             exit 1 ;;
     esac
 done
+
+# Rollback: if migration (or any step before drop-in flip) fails, restore
+# the backed-up live dir. Without this trap, an interrupted run leaves
+# data/hnsw/ either missing or half-written, and hnsw_rollback.sh only
+# touches the drop-in — not the data. ERR fires on `set -e` triggers,
+# EXIT on any exit; success path nulls HNSW_BACKUP before its own trap-clear.
+_rollback_on_failure() {
+    local rc=$?
+    if [ -n "$HNSW_BACKUP" ] && [ -d "$HNSW_BACKUP" ]; then
+        echo "*** cutover failed (rc=$rc) — restoring HNSW backup: $HNSW_BACKUP" >&2
+        rm -rf "$HNSW_DATA"
+        mv "$HNSW_BACKUP" "$HNSW_DATA"
+    fi
+}
+trap _rollback_on_failure ERR
 
 run() {
     if [ "$DRY_RUN" = "1" ]; then
@@ -80,10 +99,15 @@ if [ "$SKIP_MIGRATE" != "1" ]; then
     # the same Embedder instead — bit-identical vectors.
     if [ -d "$HNSW_DATA" ]; then
         STAMP="$(date +%Y%m%d-%H%M%S)"
-        run mv "$HNSW_DATA" "${HNSW_DATA}.bak-${STAMP}"
+        HNSW_BACKUP="${HNSW_DATA}.bak-${STAMP}"
+        run mv "$HNSW_DATA" "$HNSW_BACKUP"
     fi
     run "$VENV_PY" "$MIGRATE"
 fi
+
+# Past the destructive window — clear rollback target so success doesn't
+# accidentally restore an older snapshot on a later (recoverable) error.
+HNSW_BACKUP=""
 
 run mv "$DROPIN_STAGED" "$DROPIN_ACTIVE"
 run systemctl --user daemon-reload
