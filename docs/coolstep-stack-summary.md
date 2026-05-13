@@ -9,10 +9,11 @@
 
 coolstep is a local, privacy-first ML daemon that predicts CPU thermal pressure on a laptop and applies
 soft hardware interventions (fan bias, power cap, EPP nudge) *before* the firmware's reactive throttle
-fires. The main loop runs at 1 Hz: collect telemetry → embed into ChromaDB → KNN predict + trajectory
-overlay → decision engine → route to actuators. As of v0.3.0 the system is in a 14-day calibration
-window on the target ASUS TUF A15 (Ryzen 9 7940HS + Radeon 780M + RTX 4060M); actuators are wired
-and exercised in dry-run mode pending `calibration_ready=True`.
+fires. The main loop runs at 1 Hz: collect telemetry → embed into the KNN store (HnswStore by default
+since v0.5.9, ChromaStore as fallback — selectable via `COOLSTEP_KNN_BACKEND`, see ADR-022) → KNN
+predict + trajectory overlay → decision engine → route to actuators. Calibration is past on the
+target host (ASUS TUF A15: Ryzen 9 7940HS + Radeon 780M + RTX 4060M) and actuators are armed in
+production with the cool/quiet/off mode pill exposed on the dashboard.
 
 ---
 
@@ -48,7 +49,8 @@ and exercised in dry-run mode pending `calibration_ready=True`.
   │  FEATURES  (core/fingerprint.py)                             │
   │  cpu_temp_max, slope_per_sec, load_p95, gpu_temp_max, …      │
   └───────────────┬──────────────────────────────────────────────┘
-                  │  embed() → ChromaDB  +  query top_k=20
+                  │  embed() → KNN store (chroma/ or hnsw/, per COOLSTEP_KNN_BACKEND)
+                  │             + query top_k=20
                   ▼
   ┌──────────────────────────────────────────────────────────────┐
   │  PREDICTOR  (core/predictor.py)                              │
@@ -76,7 +78,7 @@ and exercised in dry-run mode pending `calibration_ready=True`.
   └──────────────────────────────────────────────────────────────┘
 ```
 
-Side-writes at each tick: `ChromaDB` (vector + metadata), `runtime-state.json` (FSM + armed actions),
+Side-writes at each tick: KNN store (`chroma/` or `hnsw/` per `COOLSTEP_KNN_BACKEND`), `runtime-state.json` (FSM + armed actions),
 `actuator-journal.jsonl` (every apply/revert event).
 
 ---
@@ -105,7 +107,7 @@ at discovery. Per-collector timeouts: 0.3 s default; `hyprctl` overridden to 2.0
 
 ### KNN (primary)
 
-`KnnPredictor` queries ChromaDB with the current frame's embedding vector, fetches `top_k=20`
+`KnnPredictor` queries the configured KNN store (HnswStore default, ChromaStore fallback — see ADR-022) with the current frame's embedding vector, fetches `top_k=20`
 nearest neighbours, votes on `was_hot_in_30s` label:
 
 ```
@@ -133,7 +135,7 @@ Runs in parallel; result merged via `max()`:
 When trajectory dominates: `confidence = min(0.7, knn_conf + 0.2)` — bumped so
 `RAMP_COOLING` can clear the `min_arm_confidence = 0.5` gate.
 
-`AlwaysIdleBaseline` (P0 stub) replaces KnnPredictor when ChromaDB is unavailable.
+`MetaPredictor(TrajectoryBaseline + ResidualBank)` is the production fallback when the KNN store is unavailable (Newton-cooling forecast + bucketed residual correction, no neighbour signals). `AlwaysIdleBaseline` (P0 stub) remains as a deeper emergency fallback below that.
 
 ---
 
@@ -212,7 +214,8 @@ auto-revert any action whose `expires_at + TTL_GRACE_SEC` has elapsed.
 | Artifact | Path (relative to `COOLSTEP_HOME`) | What persists | Restart behaviour |
 |----------|------------------------------------|---------------|-------------------|
 | `store.db` | `store.db` | SQLite: `frames` (14-day TTL), `throttle_events` (90-day), `actions` | survives restart; rotated every 600 ticks (~10 min) |
-| ChromaDB vectors | `chroma/` | HNSW index: per-frame embedding + metadata (`ts`, `cpu_temp_at`, `was_hot_in_30s`, `peak_temp_after`, `workload_label`) | persistent; `was_hot_in_30s=-1` (UNKNOWN) backfilled to COOL/HOT by daemon on tick |
+| KNN store (chroma) | `chroma/` | HNSW index via chromadb: per-frame embedding + metadata (`ts`, `cpu_temp_at`, `was_hot_in_30s`, `peak_temp_after`, `workload_label`); active when `COOLSTEP_KNN_BACKEND=chroma` (legacy default) | persistent; `was_hot_in_30s=-1` (UNKNOWN) backfilled to COOL/HOT by daemon on tick |
+| KNN store (hnsw) | `hnsw/` | hnswlib `index.bin` + `meta.sqlite` side-table; active when `COOLSTEP_KNN_BACKEND=hnsw` (default since v0.5.9). Staging dir `hnsw.staging/` + crash-recovery `hnsw.backup/` used by `embedder_refit.refit_and_swap` | persistent; backfill writes the same `was_hot_in_30s` / `peak_temp_after` labels |
 | `runtime-state.json` | `runtime-state.json` | throttle FSM state, `backfill_cursor_ts`, `armed_actions[]` | written per-tick AND on FSM transitions; read at startup to restore FSM + revert any stale armed actions |
 | `ml-state.json` | `ml-state.json` | predictor snapshot every 30 ticks: throttle_prob, confidence, features, calibration_ready, labeled_count, uptime, chroma stats | lost on restart; regenerated after first 30 ticks |
 | `asusctl_fan_curve_baseline.json` | `asusctl_fan_curve_baseline.json` | baseline fan curve anchors snapshot taken at first `apply()`; re-snapshotted every 5 min | survives restart; used by `coolstep-cleanup.sh` for SIGKILL recovery |
@@ -323,7 +326,8 @@ or export in shell for ad-hoc runs.
 
 | Env var | Default | Controls | When to change |
 |---------|---------|----------|----------------|
-| `COOLSTEP_HOME` | `~/coolstep/data` | Root dir for store.db, chroma/, ml-state.json, runtime-state.json, journal | non-default install path |
+| `COOLSTEP_HOME` | `~/coolstep/data` | Root dir for store.db, chroma/ or hnsw/ (per COOLSTEP_KNN_BACKEND), ml-state.json, runtime-state.json, journal | non-default install path |
+| `COOLSTEP_KNN_BACKEND` | `chroma` (selector default) / `hnsw` (recommended) | KNN backend selector — see ADR-022. `hnsw` for the chroma-hnswlib direct path (faster, no chromadb SEGV exposure); `chroma` for the legacy chromadb collection | resource-constrained hosts; v0.5.9+ deployments |
 | `COOLSTEP_HOT_THRESHOLD_C` | `82.0` | Lookahead label: frames where peak temp in next 30 s ≥ this → `LABEL_HOT` | host with different TjMax or thermal design |
 | `COOLSTEP_THROTTLE_ENTER_C` | `90.0` | Throttle FSM: enter "hot" episode above this | conservative: lower; aggressive: raise toward TjMax |
 | `COOLSTEP_THROTTLE_EXIT_C` | `85.0` | Throttle FSM: exit "hot" episode below this (hysteresis) | must be ≤ ENTER |
@@ -425,8 +429,8 @@ Pending items tracked in `TODO.md`:
 - **P2** — live actuator enable after P0 calibration + P1 predictor validated (recall ≥ 0.6).
 - **P3–P6** — multi-platform: Linux desktop (no Hyprland/iGPU), server (Redfish/IPMI), Windows, macOS.
 
-For architectural decisions (why Python, why sqlite, why ChromaDB, wrap-not-write) see
-`docs/stack-decisions.md` (12 ADRs). For open design questions (project rename, sample granularity,
+For architectural decisions (why Python, why sqlite, KNN backend, wrap-not-write) see
+`docs/stack-decisions.md` (20 ADRs, ADR-001…024). For open design questions (project rename, sample granularity,
 server priority) see `TODO.md:Open questions`.
 
 Existing docs that predate v0.3.0 and are partially superseded by this document:

@@ -1,6 +1,6 @@
 # Maintainer: zzallirog <github.com/zzallirog>
 pkgname=coolstep
-pkgver=0.5.10
+pkgver=0.5.11
 pkgrel=1
 pkgdesc="Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard"
 arch=('any')
@@ -56,10 +56,11 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
-  PYTHONDONTWRITEBYTECODE=1 \
-    # Failing tests now fail the build. test_daemon.py is excluded because
-    # chromadb-rust-bindings segfaults on Python 3.14; see docs/troubleshooting.md.
-    PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
+  # Failing tests now fail the build. test_daemon.py is excluded because
+  # chromadb-rust-bindings segfaults on Python 3.14; see docs/troubleshooting.md.
+  # (Comment outside the command — a `#` after `\` would break the line
+  # continuation and dangle the env-var assignment as a no-op.)
+  PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
 }
 
 package() {

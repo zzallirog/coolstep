@@ -18,7 +18,7 @@ calls `subprocess.run` on `asusctl`, `ryzenadj`, or the EPP sysfs node.
 The fan curve actually moves. The boost limit actually drops.
 
 The transition between the two is not a button. It is the conjunction
-of eight gates, evaluated continuously. As long as all eight are green,
+of five core gates plus up to three runtime-conditional gates (`cost_rss`, `cost_cpu`, `ring_warmup`), evaluated continuously. As long as all present gates are green,
 the actuator can fire; if any goes red mid-session, the actuator is
 disarmed automatically until it goes green again.
 
@@ -116,7 +116,12 @@ auto-satisfied — the predictor runs on hardware-only signals.
 
 ### 6. KNN warm-up
 
-ChromaDB must contain at least 5 labeled vectors. The label
+The KNN store must contain at least 5 labeled vectors. Store is
+either `ChromaStore` or `HnswStore` per `COOLSTEP_KNN_BACKEND` (the
+gate reads the count through the store-agnostic
+`KnnStore.count_labeled()` so HNSW hosts see the same gate). On HNSW
+the labeled count comes from `data/hnsw/meta.sqlite`; on chroma from
+the collection. The label
 (`was_hot_in_30s`) is assigned by a 30-second lookahead after each
 sample: if `cpu_temp ≥ 90` happens within 30 seconds of this frame, the
 frame's vector gets `label=1`, else `label=0`. The 30-second delay is
@@ -138,6 +143,26 @@ Why this matters: a confident-but-wrong predictor will spam the
 actuator. A low-confidence predictor that occasionally fires is fine.
 The gate keeps the actuator gated to the predictor's own self-assessed
 reliability.
+
+**Per-bucket trust modes** layer on top of this gate (added in
+v0.5.9). `MetaPredictor` (`coolstep/core/predictor_meta.py`) clamps
+`bucket_certainty` to **0.4** when the current bucket has fewer than 5
+residual samples (the "learning" regime), pulling composed confidence
+*below* the base predictor's value even when the KNN itself is
+self-confident. Once a bucket accumulates ≥ 5 samples, certainty
+scales normally from the residual σ. Three named regimes:
+
+| Mode | Sample count | What it means |
+|---|---|---|
+| `prior` | n < 2 | Bayesian prior dominates; correction is the bucket's prior mean only |
+| `shrunk` | 2 ≤ n < 5 | Empirical mean shrunk toward prior by sample count; intermediate trust |
+| `confident` | n ≥ 5 | Empirical mean used directly; full trust in the bucket's residual history |
+
+The cockpit surfaces the current bucket's mode under the bucket strip
+(`trust_mode` field in `/api/predictor-cockpit`). This is observable
+state — the gate-7 floor on average confidence is what blocks armed
+operation, but the trust mode tells the operator *why* a specific
+prediction's confidence is what it is.
 
 ### 8. Re-arm gap
 
@@ -162,6 +187,8 @@ COOLSTEP_COVERAGE_HOURS=24
 COOLSTEP_THROTTLE_EVENTS=3
 COOLSTEP_PEAK_TEMP=80
 COOLSTEP_WORKLOAD_CLUSTERS=3
+COOLSTEP_COST_RSS_KB=50000     # daemon RSS budget (KB); cost_rss gate fires when present
+COOLSTEP_COST_CPU_PCT=1.0      # daemon CPU budget (%); cost_cpu gate fires when present
 COOLSTEP_HYPRCTL_MISS_PCT=5
 COOLSTEP_THROTTLE_ENTER_C=90
 COOLSTEP_THROTTLE_EXIT_C=85

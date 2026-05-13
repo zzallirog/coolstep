@@ -3,8 +3,8 @@
 > Sinks of decisions. Action verbs → vendor commands. **Безопасность —
 > главная invariant.**
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ adapters → `../CLAUDE.md`
 - ↔ peer → `../collectors/CLAUDE.md`

@@ -2,16 +2,16 @@
 
 > Точка входа в Python-пакет. Тут живёт `daemon.py`, всё остальное — подмодули.
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ master → `~/coolstep/CLAUDE.md`
 - ↓ children → `core/CLAUDE.md`, `adapters/CLAUDE.md`, `dashboard/CLAUDE.md`, `inspect/CLAUDE.md`
 
 ## Purpose
 
-Собирает дерево модулей в один Python-пакет с тремя entry points (`coolstep`,
-`coolstep-collector`, `coolstep-dashboard`). Сам по себе ничего не делает —
+Собирает дерево модулей в один Python-пакет с четырьмя entry points (`coolstep`,
+`coolstep-collector`, `coolstep-dashboard`, `coolstep-mcp`). Сам по себе ничего не делает —
 делегирует.
 
 ## Invariants

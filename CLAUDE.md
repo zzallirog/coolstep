@@ -4,16 +4,32 @@
 > этот файл**, затем перейди в нужный subdir по карте ниже. Не читай весь
 > код — он избыточен. Используй карту.
 
-**Repo version:** 0.5.0 (P2.5 — adaptive curve + incidents + workload profiles + event segmentation, 2026-05-12)
+**Repo version:** 0.5.11 (P2.10 — docs sync atop P2.8 HNSW cutover + P2.9 hotfixes, 2026-05-13)
 **Walk protocol:** см. секцию «Self-update protocol» внизу.
 
-> **P2.5 ship-status (2026-05-12 night):** см. `docs/p2.5-rollup.md` для
-> полного списка. Pending wiring + blockers — в memory
-> `[[project-coolstep-p2_5-followup-todo]]`.
-> Chroma SEGV сейчас замаскирован `COOLSTEP_CHROMA_DISABLED=1` (drop-in
-> `~/.config/systemd/user/coolstep-collector.service.d/60-chroma-disabled.conf`)
-> — predictor работает на `AlwaysIdleBaseline`, KNN-зависимые сигналы
-> (danger / suggested_rpm / cluster_drift) спящие до починки.
+> **P2.8–P2.11 ship-status (2026-05-13):**
+> - **P2.8 (v0.5.9):** HNSW backend live via `COOLSTEP_KNN_BACKEND=hnsw`
+>   (ADR-022) — `coolstep/adapters/storage/hnsw.py` drops in for
+>   `ChromaStore` on the hot read path (5800× refresh speedup); migration
+>   walked through `scripts/cutover_to_hnsw.sh`; rollback via
+>   `scripts/hnsw_rollback.sh --restore-data`. Chroma SEGV resolved by
+>   bypassing chromadb on the hot path. `COOLSTEP_CHROMA_DISABLED=1`
+>   stays as emergency fallback. New modules: `core/knn.py` (selector),
+>   `core/embedder_refit.py` (drift-triggered refit + atomic swap),
+>   `core/storage_common.py` (shared metadata coercion).
+> - **P2.9 (v0.5.10):** audit hotfixes — atomic writes for
+>   `ml-state.json` + `runtime-state.json` (tempfile + `os.replace`);
+>   `Store` read methods now hold the writer lock; `/api/predictor-cockpit`
+>   moved into `asyncio.to_thread`; `MetaPredictor.predict` forwards KNN
+>   neighbours / `danger_neighbour_count` / `suggested_rpm`;
+>   `embedder_refit.refit_and_swap` hard-gated against `ChromaStore`.
+> - **P2.10 (v0.5.11):** post-release docs sync — README badges + Quickstart
+>   point at `coolstep_init.sh`; CLAUDE.md / architecture.md / stack-summary.md
+>   reflect HNSW as recommended backend; troubleshooting.md gets the
+>   `chroma-hnswlib` collision warning + HNSW-as-preferred-fix path;
+>   drift-detection.md documents `DriftGate` + refit guards;
+>   calibration-gates.md documents trust modes + cost overrides; module
+>   `CLAUDE.md` re-synced to module surfaces.
 
 ---
 
@@ -23,7 +39,7 @@
 - **Архитектура:** core (platform-neutral) + adapters (per-platform plugins) + dashboard.
 - **Где запускается:** target — ASUS TUF A15 (Ryzen 9 7940HS + Radeon 780M + RTX 4060M).
 - **Roadmap:** P0 (foundation) → P1 (ML predictor) → P2 (soft actuators) → **P2.5 (adaptive curve + incidents + workload profiles)** → P3+ (desktop/server/win/mac).
-- **Стэк:** Python 3.12 (3.14 venv on target), FastAPI + SSE, Lit (P2.4 redesign — INSTRUMENT identity + 6 themes), sqlite, ChromaDB (currently disabled — SEGV), без сети.
+- **Стэк:** Python 3.12 (3.14 venv on target), FastAPI + SSE, Lit (P2.4 redesign — INSTRUMENT identity + 6 themes), sqlite, HNSW via `chroma-hnswlib` (default since v0.5.9 — `COOLSTEP_KNN_BACKEND=hnsw`; ChromaDB pinned `<1.0` as fallback), без сети.
 - **Privacy:** всё локально, никаких отправок.
 - **Operational modes:** `cool` (default — anticipatory cooling) / `quiet` (subtractive bias on calm windows, safety eject @ 80°C) / `off` (notify-only).
 
@@ -47,7 +63,7 @@ coolstep/
 │   └── inspect/CLAUDE.md           → CLI: adapters/tail/stats/export
 │
 ├── docs/CLAUDE.md                  → концепт, физика, архитектура, ADR'ы, calibration gates
-├── tests/CLAUDE.md                 → pytest 98 tests
+├── tests/CLAUDE.md                 → pytest ~860 tests (859 collected, P2.10 sync 2026-05-13)
 ├── systemd/CLAUDE.md               → user-units (collector + dashboard)
 └── data/CLAUDE.md                  → runtime store (gitignored)
 ```
@@ -243,7 +259,7 @@ manifest** через `signals()` метод — список `SignalDescriptor`
 
 ---
 
-## New modules (P2.4 + P2.5) — quick map
+## New modules (P2.4 → P2.9) — quick map
 
 ```
 coolstep/core/
@@ -252,14 +268,24 @@ coolstep/core/
 ├── workload_profile.py   ◀ NEW P2.5 — Profile enum + resolver
 ├── event_segmentation.py ◀ NEW P2.5 — focus/load_jump/plateau segments
 ├── efficiency_calibration.py ◀ NEW P2.5 — stable-run analyser
-├── cluster_drift.py      ◀ NEW P2.5 — workload-cluster Δ°C over time
-├── ewma_filter.py        ◀ NEW P2.5 — confidence-adaptive smoothing (NOT WIRED YET)
-└── snapshot_archive.py   ◀ NEW P2.5 — golden-state archive (TRIGGER NOT WIRED)
+├── cluster_drift.py      ◀ NEW P2.5 — workload-cluster Δ°C + DriftGate streak
+├── ewma_filter.py        ◀ NEW P2.5 — confidence-adaptive smoothing
+├── snapshot_archive.py   ◀ NEW P2.5 — golden-state archive
+├── knn.py                ◀ NEW P2.8 — backend selector (COOLSTEP_KNN_BACKEND=chroma|hnsw)
+├── embedder_refit.py     ◀ NEW P2.8 — drift-triggered refit + atomic HNSW swap (hard-gated against ChromaStore)
+├── storage_common.py     ◀ NEW P2.8 — shared metadata coercion for ChromaStore + HnswStore
+├── predictor_meta.py     ◀ NEW P2.8 — L1+L2 composition (TrajectoryBaseline + ResidualBank)
+├── residual_meta.py      ◀ NEW P2.8 — Bayesian shrinkage + TrustMode (PRIOR/SHRUNK/CONFIDENT)
+└── residual_log.py       ◀ NEW P2.8 — bounded-memory tail() streaming (P2.9 fix)
+
+coolstep/adapters/storage/
+├── chroma.py             ◀ existing, now routed through knn.py
+└── hnsw.py               ◀ NEW P2.8 — hnswlib-backed KNN store + atomic swap recovery
 
 coolstep/dashboard/static/
 ├── instrument.js         ◀ P2.4 — entry point (replaces dashboard.js)
 ├── pills/                ◀ P2.4 — per-pill modules (8 total incl. profile)
-└── components/incidents-tile.js + event-segments-tile.js ◀ NEW
+└── components/incidents-tile.js + event-segments-tile.js + predictor-cockpit-tile.js
 ```
 
 Каждый NEW модуль — pure functions / immutable dataclasses. Daemon

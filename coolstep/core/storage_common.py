@@ -1,6 +1,6 @@
 """Shared schema-coercion helpers for the KNN stores.
 
-`ChromaStore` (adapters/storage/chroma.py) and `HnswStore` (core/knn_hnsw.py)
+`ChromaStore` (adapters/storage/chroma.py) and `HnswStore` (adapters/storage/hnsw.py)
 both persist metadata that chromadb rejects unless coerced to primitive
 int/float/str. Keeping the type-key tables in one place avoids drift when
 new label keys are added.

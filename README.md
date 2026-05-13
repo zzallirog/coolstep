@@ -7,8 +7,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.4](https://img.shields.io/badge/release-v0.5.4-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.4)
-[![tests](https://img.shields.io/badge/tests-798_passed-brightgreen)](#tested-against)
+[![v0.5.11](https://img.shields.io/badge/release-v0.5.11-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.11)
+[![tests](https://img.shields.io/badge/tests-859_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 
 <picture>
@@ -174,8 +174,8 @@ closed.
 ## Install
 
 Two install paths. Both put a `coolstep` binary on your `PATH` that
-runs from anywhere, plus two daemon entry points (`coolstep-collector`,
-`coolstep-dashboard`) that you opt into separately.
+runs from anywhere, plus three daemon entry points (`coolstep-collector`,
+`coolstep-dashboard`, `coolstep-mcp`) that you opt into separately.
 
 > **⚠ Never `sudo pip install`.** coolstep is a user-level tool. The
 > daemon runs as your regular user; data and config live under
@@ -206,11 +206,12 @@ with system Python packages. Easy to upgrade
 **Expected output.** A progress bar, then:
 
 ```
-  installed package coolstep 0.5.4, installed using Python 3.12+
+  installed package coolstep 0.5.11, installed using Python 3.12+
   These apps are now available:
     - coolstep
     - coolstep-collector
     - coolstep-dashboard
+    - coolstep-mcp
 done! ✨ 🌟 ✨
 ```
 
@@ -242,7 +243,7 @@ keeps the install in `~/.local/` and never touches system packages.
 **Expected output.** Standard pip output, ending in:
 
 ```
-Successfully installed coolstep-0.5.4
+Successfully installed coolstep-0.5.11
 ```
 
 ---
@@ -265,7 +266,17 @@ Right after install — regardless of path — three things are true:
    `systemctl --user list-unit-files | grep coolstep`, but neither is
    active. You decide when to enable them.
 
-To bring the daemon up:
+To bring the daemon up the quickest way:
+
+```bash
+bash scripts/coolstep_init.sh      # idempotent first-run wizard
+                                    # (detects laptop/desktop/server, drops the
+                                    #  matching .conf, seeds ~/coolstep/data/,
+                                    #  bootstraps calibration, verifies units)
+xdg-open http://127.0.0.1:18889/
+```
+
+Or step-by-step if you prefer to drive each piece yourself:
 
 ```bash
 coolstep install-units             # writes systemd unit files (pipx/pip only)
@@ -307,13 +318,18 @@ override — and even then, only after the eight calibration gates
 ### Requirements
 
 - Linux kernel ≥ 5.10
-- Python 3.10–3.13 recommended. **Python 3.14** triggers a known
-  `chromadb` rust-bindings segfault — the daemon detects and falls
-  back to `AlwaysIdleBaseline` automatically (no KNN, predictions
-  return 0.0), but you lose the predictor entirely. Either downgrade
-  to 3.13 *or* set `COOLSTEP_CHROMA_DISABLED=1` explicitly to silence
-  the warning and run dashboard-only. See
+- Python 3.10–3.13 recommended. **Python 3.14** had a `chromadb`
+  rust-bindings segfault — resolved in v0.5.9 by routing the hot
+  KNN read-path through `hnswlib` (`COOLSTEP_KNN_BACKEND=hnsw`,
+  ADR-022). `chromadb<1.0` is pinned as fallback; the daemon stays
+  on `MetaPredictor(TrajectoryBaseline + ResidualBank)` if the KNN
+  store is unavailable. See
   [troubleshooting](docs/troubleshooting.md#chromadb-segfaults-on-python-314).
+- **KNN backend (optional `[ml]` extras):** `pip install "coolstep[ml]"`
+  pulls `chromadb<1.0` + `chroma-hnswlib>=0.7.6`. Do **not** install
+  bare upstream `hnswlib` alongside — both packages ship the same
+  `hnswlib` module file, and the upstream `.so` will silently
+  overwrite the chroma fork's, leaving KNN queries returning empty.
 - One of `pipx`, `pip`, or `uv` (most distros have at least one
   pre-installed; minimal hosts like Proxmox base or Alpine may need a
   one-time install — see
@@ -337,7 +353,10 @@ override — and even then, only after the eight calibration gates
 | P2 — actuator stack with sandbox-first defaults | ✅ |
 | P2.5 — perf and ML/control hardening | ✅ |
 | P2.6 — predictor cockpit relational metrics + 30 s err chip | ✅ v0.5.4 |
-| P2.7 — spike-driven training archive (detector + incident plumbing) | ✅ v0.5.4 (chroma backfill pending) |
+| P2.7 — spike-driven training archive (detector + incident plumbing) | ✅ v0.5.4 |
+| P2.8 — HNSW backend selector + embedder refit + trust modes | ✅ v0.5.9 |
+| P2.9 — atomic ml-state / runtime-state, sqlite lock, cockpit `asyncio.to_thread` | ✅ v0.5.10 |
+| P2.10 — docs sync (HNSW everywhere; trust modes; AUR PKGBUILD) | ✅ v0.5.11 |
 | **P3 — two deployment targets, three-layer manifest, community pointers** | **✅ v0.5.0** |
 | P3.1 — dashboard target-aware tile reordering | ⚪ |
 | P3.2 — `coolstep manifest update` (community feed sync) | ⚪ |
@@ -359,7 +378,7 @@ override — and even then, only after the eight calibration gates
 | [`docs/efficiency-curve.md`](docs/efficiency-curve.md) | `work_per_degree`, the sweet spot, and the knee |
 | [`docs/curve-ownership.md`](docs/curve-ownership.md) | Who manages the fan curve at each layer — BIOS, vendor tool, your profile, coolstep bias — and where coolstep's authority ends |
 | [`docs/drift-detection.md`](docs/drift-detection.md) | Seven indicators that the model has gone stale |
-| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Fifteen ADRs covering why this stack and not another |
+| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Twenty ADRs covering why this stack and not another (ADR-001…024) |
 | [`docs/p3-plan.md`](docs/p3-plan.md) | The two-target design and the three-layer manifest |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Every warning `coolstep compat` can print, with per-distro fixes |
 | [`docs/privileges.md`](docs/privileges.md) | What needs root, why, and how to grant the minimum safely |

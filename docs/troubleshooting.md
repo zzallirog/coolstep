@@ -407,18 +407,68 @@ automatically.
 
 ### `chromadb` segfaults on Python 3.14
 
-Known issue with chromadb-rust-bindings on Python 3.14. The daemon
-falls back to `AlwaysIdleBaseline` when ChromaDB isn't available.
+Known issue with chromadb-rust-bindings on Python 3.14.
 
-To explicitly disable ChromaDB:
+**Preferred fix (v0.5.9+) — switch the KNN backend to HNSW:**
+
+```bash
+echo 'COOLSTEP_KNN_BACKEND=hnsw' >> ~/.config/coolstep/env
+systemctl --user restart coolstep-collector
+```
+
+The HNSW path uses `chroma-hnswlib` directly and never imports the
+crashing rust bindings. Full KNN prediction is preserved (neighbours,
+`suggested_rpm`, `danger_neighbour_count` all keep working). See
+ADR-022 for the rationale and `scripts/cutover_to_hnsw.sh` for a
+guided migration on an existing host.
+
+**Emergency fallback — disable ChromaDB entirely:**
 
 ```bash
 echo 'COOLSTEP_CHROMA_DISABLED=1' >> ~/.config/coolstep/env
 systemctl --user restart coolstep-collector
 ```
 
-The KNN predictor goes quiet; trajectory-fallback still works.
-Re-enable when chromadb ships a Python 3.14 wheel.
+The predictor falls back to `MetaPredictor(TrajectoryBaseline +
+ResidualBank)` — Newton-cooling forecast plus bucketed residual
+correction stays active; only the KNN neighbour signals go quiet.
+
+### `chroma-hnswlib` vs upstream `hnswlib` — silent KNN empty-results
+
+If you ever `pip install hnswlib` (the upstream package) into the same
+venv as coolstep, the upstream `.so` silently overwrites
+`chroma-hnswlib`'s vendored `.so`. Symptoms: KNN queries return zero
+neighbours, no errors logged, dashboard `neighbours_tile` empty.
+
+Fix:
+
+```bash
+pip uninstall -y hnswlib chroma-hnswlib
+pip install "chroma-hnswlib>=0.7.6"
+```
+
+`pyproject.toml` `[ml]` extras pin `chroma-hnswlib>=0.7.6` and do not
+list bare `hnswlib`. Do not install both side-by-side.
+
+### HNSW swap failed / `data/hnsw.backup/` is present
+
+The `embedder_refit.refit_and_swap` pipeline (drift-triggered) does an
+atomic-ish rename: `data/hnsw/` → `data/hnsw.backup/`, then
+`data/hnsw.staging/` → `data/hnsw/`. On clean shutdown the backup
+remains as a safety copy and is overwritten on the next refit.
+
+If you see `embedder_refit: post_swap_discover_failed` in the journal,
+the live dir is bound to an unreadable index. Recovery:
+
+```bash
+systemctl --user stop coolstep-collector
+rm -rf ~/coolstep/data/hnsw           # remove the failed swap
+mv ~/coolstep/data/hnsw.backup ~/coolstep/data/hnsw
+systemctl --user start coolstep-collector
+```
+
+`scripts/hnsw_rollback.sh --restore-data` automates the same recovery
+from any `data/hnsw.bak-<stamp>/` created by `cutover_to_hnsw.sh`.
 
 ## Still stuck?
 

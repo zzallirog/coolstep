@@ -8,6 +8,84 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-05-13
+
+Documentation re-sync atop v0.5.10.  No code behaviour changes; all
+edits address documentation drift surfaced by a per-file audit
+against the v0.5.9/v0.5.10 code state.
+
+### Changed
+
+- **README.md** — release / test badges bumped to v0.5.11 / 859 tests;
+  install description now lists four entry points (`coolstep-mcp`
+  added); expected pipx / pip output examples bumped to 0.5.11;
+  Requirements section explains the `[ml]` extras pin
+  (`chroma-hnswlib>=0.7.6`) and the upstream `hnswlib` collision
+  hazard; Python 3.14 chromadb-SEGV recommendation switched to "use
+  `COOLSTEP_KNN_BACKEND=hnsw`" instead of degrading to baseline;
+  Quickstart adds `scripts/coolstep_init.sh` as the recommended
+  bring-up path; Roadmap gains P2.8 / P2.9 / P2.10 rows.
+- **CLAUDE.md (root)** — repo version 0.5.0 → 0.5.11; stale
+  "P2.5 ship-status with Chroma SEGV mask" replaced with P2.8 / P2.9
+  / P2.10 rollup; stack stanza no longer claims "ChromaDB currently
+  disabled"; module map extended with `core/knn.py`,
+  `core/embedder_refit.py`, `core/storage_common.py`,
+  `core/predictor_meta.py`, `core/residual_meta.py`,
+  `core/residual_log.py`, `adapters/storage/hnsw.py`; tests count
+  refreshed.
+- **docs/architecture.md** — KNN backend section renamed and
+  rewritten to cover both ChromaStore and HnswStore (ADR-022); module
+  map gains the four new `core/` modules and the `adapters/storage/`
+  subtree; predictor-disable table covers both env vars; disk
+  footprint diagram shows `chroma/ OR hnsw/`; ADR count fixed
+  (15 → 20).
+- **docs/coolstep-stack-summary.md** — TL;DR no longer hard-codes
+  ChromaDB; data-flow diagram shows the backend selector;
+  side-writes caption covers both stores; storage table split
+  into chroma + hnsw rows; tuning-levers table gains
+  `COOLSTEP_KNN_BACKEND`; "12 ADRs" → "20 ADRs"; v0.3.0
+  calibration-window framing replaced by "calibration past, armed
+  in production".
+- **docs/troubleshooting.md** — `chromadb` SEGV section reordered to
+  put `COOLSTEP_KNN_BACKEND=hnsw` as the **preferred** fix and
+  `COOLSTEP_CHROMA_DISABLED=1` as emergency fallback (with accurate
+  `MetaPredictor(TrajectoryBaseline + ResidualBank)` fallback path);
+  new section on `chroma-hnswlib` vs upstream `hnswlib` silent
+  empty-results hazard; new section on `data/hnsw.backup/` and the
+  `hnsw_rollback.sh --restore-data` recovery flow.
+- **docs/drift-detection.md** — embedder-stats persistence note
+  updated (no longer "doesn't exist yet"); `chroma_no_growth` and
+  `chroma_dir_bloat` indicators clarified as historical names that
+  evaluate through store-agnostic `count_labeled()` or the chroma
+  dir if present; new section on `DriftGate` streak logic
+  (`min_consecutive`, `min_gap_sec`); new section on
+  `embedder_refit.refit_and_swap` pipeline and the three hard guards
+  (`spike_active`, `hnsw_count<5000`, `parity<0.90`) plus the
+  v0.5.10 `ChromaStore` hard-gate.
+- **docs/calibration-gates.md** — "eight gates" reframed as "five
+  core + up to three runtime-conditional"; gate 6 description
+  generalised from "ChromaDB must contain" to "the KNN store must
+  contain" (with note on `data/hnsw/meta.sqlite`); gate 7 gains a
+  trust-modes sub-section (`prior` / `shrunk` / `confident`) tied to
+  `MetaPredictor` bucket-sample counts; `COOLSTEP_COST_RSS_KB` and
+  `COOLSTEP_COST_CPU_PCT` overrides documented.
+- **Module CLAUDE.md** (8 files: package root, core, adapters,
+  actuators, collectors, dashboard, inspect, tests) — module-version
+  and last-synced fields refreshed to 0.3.0 / 2026-05-13; root
+  package entry-points count corrected to four (mcp added);
+  dashboard's legacy `dashboard.js` reference replaced with
+  `instrument.js` (the P2.4 entry point).
+- **packaging/aur/README.md** — daemon-test-exclusion note rewritten
+  to point at `COOLSTEP_KNN_BACKEND=hnsw` as production
+  recommendation; test count refreshed.
+- **packaging/aur/coolstep/PKGBUILD** + **coolstep-git/PKGBUILD** —
+  `check()` block no longer has a comment between `\` and the
+  next line of the command (which silently broke the line
+  continuation and left a no-op `PYTHONDONTWRITEBYTECODE=1`
+  standalone before the real invocation).
+- **coolstep/core/storage_common.py** — module docstring fixed:
+  `HnswStore (core/knn_hnsw.py)` → `HnswStore (adapters/storage/hnsw.py)`.
+
 ## [0.5.10] — 2026-05-13
 
 Audit hotfix for v0.5.9.  Ten bugs surfaced by the post-release code

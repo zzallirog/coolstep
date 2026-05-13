@@ -3,8 +3,8 @@
 > pytest. 685 tests (P2.5b, 2026-05-12). Структура отражает coolstep/ один-в-один
 > плюс новый pillar `tests/compat/` (hw matrix + interference scenarios).
 
-**Module version:** 0.2.0
-**Last synced with master:** 2026-05-12
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ master → `../CLAUDE.md`
 - → tests → весь `coolstep/` package

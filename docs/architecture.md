@@ -30,7 +30,9 @@ embedding — temperatures, frequency rates, load percentiles, workload
 class one-hot, GPU power, recent slopes. The embedding is z-score
 normalized so different hosts compare cleanly.
 
-The KNN predictor queries the ChromaDB HNSW index over historical
+The KNN predictor queries the configured KNN store (HnswStore by
+default since v0.5.9 — `COOLSTEP_KNN_BACKEND=hnsw`; ChromaStore
+remains selectable as the legacy backend — see ADR-022) over historical
 embeddings, takes the top-20 neighbours, and computes
 `throttle_prob = weighted_vote(was_hot_in_30s)`. The probability is
 merged with a physics fallback signal (a steep rising slope at high
@@ -71,7 +73,13 @@ coolstep/
 │   ├── drift.py               # 7 staleness indicators
 │   ├── ewma_filter.py         # confidence-adaptive smoothing
 │   ├── snapshot_archive.py    # golden-state archive
-│   └── cluster_drift.py       # workload-cluster ΔT over time
+│   ├── cluster_drift.py       # workload-cluster ΔT over time + DriftGate streak
+│   ├── knn.py                 # backend selector (ChromaStore vs HnswStore)
+│   ├── embedder_refit.py      # drift-triggered refit with atomic HNSW swap
+│   ├── storage_common.py      # shared metadata coercion for both KNN stores
+│   ├── predictor_meta.py      # MetaPredictor: TrajectoryBaseline + ResidualBank
+│   ├── residual_meta.py       # Bayesian shrinkage + TrustMode
+│   └── residual_log.py        # bounded-memory residual tail() streaming
 │
 ├── compat/                    # the platform-detection layer
 │   ├── caps.py                # PlatformCaps frozen dataclass
@@ -95,13 +103,17 @@ coolstep/
 │   │   ├── perf_events        # `perf stat -I 1000` reader thread
 │   │   └── ebpf_sched         # `bpftrace -f json` reader thread
 │   │
-│   └── actuators/             # act (or just log)
-│       ├── readonly_log       # always-on audit
-│       ├── asusctl_fan_curve  # ASUS knee-band bias
-│       ├── epp_shift          # EPP balance_power shift
-│       ├── ryzenadj_cap       # AMD STAPM / fast-PPT
-│       ├── notify_send        # desktop popup fallback
-│       └── game_mode_optimizer # cooperate with game-mode.service
+│   ├── actuators/             # act (or just log)
+│   │   ├── readonly_log       # always-on audit
+│   │   ├── asusctl_fan_curve  # ASUS knee-band bias
+│   │   ├── epp_shift          # EPP balance_power shift
+│   │   ├── ryzenadj_cap       # AMD STAPM / fast-PPT
+│   │   ├── notify_send        # desktop popup fallback
+│   │   └── game_mode_optimizer # cooperate with game-mode.service
+│   │
+│   └── storage/               # KNN backend implementations (ADR-022)
+│       ├── chroma.py          # ChromaDB-backed store (legacy path, still wired)
+│       └── hnsw.py            # hnswlib-backed store, default since v0.5.9
 │
 ├── dashboard/                 # FastAPI + Lit
 │   ├── server.py              # 29 REST routes + SSE
@@ -122,7 +134,7 @@ single env var or systemd drop-in. The full matrix:
 | Layer | How to run it alone | How to disable it | What still works |
 |---|---|---|---|
 | **Collectors** | `coolstep tail -n 60` (no daemon) | Per-collector: skip in `discover()`. Per-host: don't enable `coolstep-collector.service` | `coolstep compat` — read-only platform report |
-| **Predictor** | Reads SQLite store, writes `ml-state.json`, no actuator wiring | `COOLSTEP_CHROMA_DISABLED=1` falls back to `AlwaysIdleBaseline` (no KNN, no predictions) | Dashboard, collectors, store still functional |
+| **Predictor** | Reads SQLite store, writes `ml-state.json`, no actuator wiring | `COOLSTEP_CHROMA_DISABLED=1` (legacy path) or `COOLSTEP_KNN_BACKEND=` set to something unsupported — both fall back to `MetaPredictor(TrajectoryBaseline + ResidualBank)`; KNN neighbours absent, Newton-cooling forecast still active | Dashboard, collectors, store still functional |
 | **Actuators** | `COOLSTEP_ACTUATOR_ENABLE=true` arms them | `COOLSTEP_ACTUATOR_ENABLE=false` (the default) — every hardware-writing actuator constructs its command and logs intent without `subprocess.run` | Predictor still predicts, dashboard still shows what would have happened |
 | **Dashboard** | `coolstep-dashboard` runs alone with read-only access to store | `systemctl --user stop coolstep-dashboard` | Daemon collects + predicts + actuates without UI |
 | **Compat / manifest** | `coolstep compat` runs the detector standalone | Default L0 manifest always loads; L1 / L2 layers are opt-in | Adapters fall back to their own `discover()` checks |
@@ -211,18 +223,30 @@ WAL means concurrent reads from the dashboard don't block daemon
 writes. Vacuum runs lazily — the file grows slightly above the working
 set and trims itself when the daemon is idle.
 
-### ChromaDB — the KNN backend (optional)
+### KNN vector store — chroma or hnsw (optional, ADR-022)
 
-`data/chroma/` is the HNSW vector index. Populated by the daemon from
-labeled `frames`, queried by the predictor for the top-20 cosine
-neighbours. When ChromaDB is unavailable (notably on Python 3.14 due to
-a known rust-bindings segfault) the predictor falls back to
-`AlwaysIdleBaseline` — no KNN, no predictions, dashboard still works.
+`coolstep/core/knn.py` is a small backend selector: `COOLSTEP_KNN_BACKEND`
+chooses between `ChromaStore` (legacy, `data/chroma/`) and `HnswStore`
+(`data/hnsw/`, the recommended path since v0.5.9). Both are populated
+by the daemon from labeled `frames` and queried by the predictor for
+the top-20 cosine neighbours.
+
+| Backend | Persist dir | Strengths | Why we keep both |
+|---|---|---|---|
+| `HnswStore` (`hnsw`) | `data/hnsw/index.bin` + `meta.sqlite` | Direct `chroma-hnswlib` query path — refresh ≈ 1.7 ms vs ~9.8 s for the chromadb collection scan; no rust-bindings SEGV on Python 3.14; smaller on-disk footprint | New default; required for `embedder_refit.refit_and_swap` (atomic dir swap with `data/hnsw.staging/` + `data/hnsw.backup/` for crash recovery) |
+| `ChromaStore` (`chroma`) | `data/chroma/` | Original implementation; richer metadata filter API | Fallback for environments where `chroma-hnswlib` cannot be installed; still passes the same `(vector, metadata, label)` contract |
+
+When the KNN store is unavailable entirely (every backend fails to
+import / discover), the predictor falls back to
+`MetaPredictor(TrajectoryBaseline + ResidualBank)` — Newton-cooling
+forecast + bucketed residual correction, no KNN-derived neighbours.
 
 A watchdog in the daemon caps the chroma directory at 500 MB warn / 5
 GB error (history at the chroma-bloat incident postmortem (internal archive)); the
 collector self-disables the chroma write path before the dir can
-explode.
+explode. The HNSW path does not bloat the same way — its element count
+is capped at `INITIAL_CAPACITY` and grown explicitly via
+`_ensure_capacity()`.
 
 ### JSONL append-only logs
 
@@ -260,7 +284,7 @@ A typical desktop install after a week of collection:
 ```
 data/
   store.db                       ~180 MB
-  chroma/                        ~50–200 MB
+  chroma/   OR   hnsw/           ~20–200 MB  (depends on COOLSTEP_KNN_BACKEND)
   decisions.jsonl{,.1,.2}        ~3 MB
   actuator-journal.jsonl{,.1,.2} ~3 MB
   incidents.jsonl                <1 MB
@@ -383,7 +407,7 @@ Three corollaries from this split:
   each layer, where coolstep's authority ends
 - [privileges.md](privileges.md) — what each actuator needs from the OS
   to actually write
-- [stack-decisions.md](stack-decisions.md) — 15 ADRs covering why this
+- [stack-decisions.md](stack-decisions.md) — 20 ADRs covering why this
   stack and not another
 - [p3-plan.md](p3-plan.md) — the two-deployment-target design and the
   three-layer manifest topology

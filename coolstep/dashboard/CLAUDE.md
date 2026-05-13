@@ -2,8 +2,8 @@
 
 > FastAPI бэкенд + frontend artifacts. Default port :18889 (атриум-стиль).
 
-**Module version:** 0.1.1
-**Last synced with master:** 2026-05-03
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - → reads from → `core/store.py`, `core/calibration.py`, `adapters/collectors/`
@@ -17,7 +17,7 @@ dashboard/
 └── static/
     ├── index.html                     # entry: подключает 5 components + legacy dashboard.js
     ├── styles.css                     # масthead + grid + legacy tile styles
-    ├── dashboard.js                   # legacy: health-pill + training tile + predictions placeholder
+    ├── instrument.js                  # P2.4 entry point (replaces legacy dashboard.js): masthead, mode pill, theme switcher, tile registry
     └── components/
         ├── _base.js                   # Lit imports + fmtNum + tileBaseStyles
         ├── live-telemetry-tile.js     # SSE consumer, 6 KV pairs + age
@@ -90,7 +90,7 @@ playwright (P1).
 
 **Q: SSE drops подключение через минуту. Это баг?**
 A: Нет, нормально. uvicorn workers могут recycle подключения, browser
-EventSource auto-reconnect'ит через 5s (см. dashboard.js).
+EventSource auto-reconnect'ит через 5s (см. instrument.js).
 
 **Q: Где чарты/графики?**
 A: P0 нет. Нужен либо Chart.js, либо лёгкий sparkline через Canvas. → P1

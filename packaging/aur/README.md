@@ -16,8 +16,10 @@ namcap PKGBUILD coolstep-git-*.pkg.tar.zst   # static lint
 ```
 
 The `check()` step runs the bundled pytest suite (excluding the chroma-bound
-`test_daemon.py`).  Daemon test exclusion mirrors `COOLSTEP_CHROMA_DISABLED=1`
-posture documented in master CLAUDE.md.
+`test_daemon.py`).  Daemon test exclusion is due to a `chromadb`
+rust-bindings SEGV on Python 3.14; see `docs/troubleshooting.md`.
+Production recommendation is to set `COOLSTEP_KNN_BACKEND=hnsw` (ADR-022),
+which bypasses the crashing path entirely.
 
 ## Generating .SRCINFO
 
@@ -47,7 +49,7 @@ Subsequent bumps: edit PKGBUILD, regenerate .SRCINFO, commit, push.
 ## When to cut a stable `coolstep` release
 
 Recommended gate (per project policy):
-1. ≥ 600 tests pass on master (current: 628/628)
+1. ≥ 600 tests pass on master (current: ~859 collected, all green excl. chroma-SEGV test_daemon.py)
 2. Calibration window completed once on at least one reference machine
 3. CHANGELOG.md updated with breaking changes flagged
 4. `git tag v0.X.Y -a -m "Release v0.X.Y"` and push to GitHub

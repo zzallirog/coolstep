@@ -3,8 +3,8 @@
 > Per-platform слой. Здесь и только здесь живут subprocess'ы, sysfs reads,
 > внешние SDK, vendor commands.
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - ↓ children → `collectors/CLAUDE.md`, `actuators/CLAUDE.md`

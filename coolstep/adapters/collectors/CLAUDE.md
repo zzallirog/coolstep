@@ -2,8 +2,8 @@
 
 > Sources of telemetry. Каждый файл — один collector. P0 на target: 4 active.
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.3.0
+**Last synced with master:** 2026-05-13
 **Connectors:**
 - ↑ adapters → `../CLAUDE.md`
 - ↔ peer → `../actuators/CLAUDE.md`

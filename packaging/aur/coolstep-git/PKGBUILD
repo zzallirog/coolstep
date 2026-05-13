@@ -73,11 +73,11 @@ build() {
 
 check() {
   cd "$_pkgname"
-  # Skip daemon test (Chroma SEGV — known, masked via COOLSTEP_CHROMA_DISABLED)
-  PYTHONDONTWRITEBYTECODE=1 \
-    # Failing tests now fail the build. test_daemon.py is excluded because
-    # chromadb-rust-bindings segfaults on Python 3.14; see docs/troubleshooting.md.
-    PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
+  # Skip daemon test (chromadb-rust-bindings SEGV on Python 3.14;
+  # production workaround: COOLSTEP_KNN_BACKEND=hnsw, see ADR-022).
+  # Comment is OUTSIDE the command — a `#` after `\` would break the
+  # line continuation and leave the env-var assignment as a no-op.
+  PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
 }
 
 package() {

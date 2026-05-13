@@ -43,12 +43,13 @@ embeddings are unreliable. The indicator fires while
 `embedder_fitted` is `False` (severity 0.4), and clears as soon as
 fitting completes.
 
-In v0.5.0 this is the full check — no temporal baseline comparison
-yet. Seasonal-shift and per-weekday-baseline detection are on the
-P3.5+ roadmap (`coolstep/core/drift.py`); they need an
-`embedder-stats.parquet` history file that doesn't exist yet. Once
-that history is in place, the same indicator name will gain a
-3-σ-versus-historical check on top of the current cold-start gate.
+Since v0.5.9 the embedder is also persisted to `embedder-stats.json`
+after each accepted refit (`coolstep/core/embedder_refit.py` writes it
+through `Embedder.save_stats`), so warm-start across daemon restarts
+is the default. Seasonal-shift and per-weekday-baseline detection are
+on the P3.5+ roadmap (`coolstep/core/drift.py`); once that history
+is in place, the same indicator name will gain a 3-σ-versus-historical
+check on top of the current cold-start gate.
 
 ### 4. `confidence_drop`
 
@@ -59,11 +60,14 @@ when the host has just hit a workload class never seen before.
 
 ### 5. `chroma_no_growth`
 
-ChromaDB should accumulate new labeled vectors over time. If the
+The KNN store (ChromaDB or HnswStore, per `COOLSTEP_KNN_BACKEND` —
+ADR-022) should accumulate new labeled vectors over time. If the
 labeled vector count has been flat for over an hour while the daemon is
 running (and the host is not idle), something is broken in the
 labelling pipeline — usually the 30-second `was_hot_in_30s` lookahead
-has stopped emitting labels for some reason.
+has stopped emitting labels for some reason. The indicator name is
+historical (it predates the HNSW backend); the check is store-agnostic
+and queries through `KnnStore.count_labeled()`.
 
 ### 6. `knn_low_confidence`
 
@@ -81,6 +85,57 @@ the chroma-bloat incident postmortem). ChromaDB's
 mismatch. The drift checker compares `chroma_dir_bytes` against a soft
 500 MB cap and a hard 5 GB cap; the soft cap warns, the hard cap
 disarms the predictor and writes an incident postmortem.
+
+**HNSW backend note.** With `COOLSTEP_KNN_BACKEND=hnsw` the live store
+is `data/hnsw/index.bin` + `meta.sqlite` and does not suffer the same
+bloat path (element count is capped at `INITIAL_CAPACITY` and grown
+explicitly). The indicator still evaluates on `data/chroma/` if that
+directory exists; on a host that's been cut over to HNSW, this
+indicator is effectively dormant unless a stale chroma dir was left
+behind.
+
+## DriftGate — streak-based refit trigger
+
+`coolstep/core/cluster_drift.py` wraps `detect_cluster_drift` with a
+`DriftGate` dataclass. Each `gate.record(drift_map)` call:
+
+1. Skips if any class shows positive drift but the previous entry is
+   newer than `min_gap_sec` (default 3600 s = 1 h).
+2. Resets the streak entirely on an all-negative map (the system has
+   cooled vs. its trailing window — no refit signal).
+3. Otherwise appends `now_ts` to the streak.
+
+`gate.should_refit()` returns `True` once `len(_streak) >=
+min_consecutive` (default 3). The daemon calls `gate.reset()` after a
+successful refit. This prevents a single transient spike from
+triggering an expensive embedder rebuild — drift must persist for at
+least three independent analyses spaced by a wall-clock hour each.
+
+## When DriftGate fires → `embedder_refit.refit_and_swap`
+
+`coolstep/core/embedder_refit.py` runs the actual refit:
+
+1. **Read** the last `window_frames` (default 10 000) from `store.db`.
+2. **Fit** a new `Embedder` on the train split.
+3. **Validate** parity on the holdout (last 5% of frames) — fraction of
+   vectors within cosine ε of the old embedding's neighbourhood.
+4. **Atomic swap** — write a fresh `hnsw.staging/`, close the live
+   store, `rename(live → hnsw.backup)`, `rename(staging → live)`,
+   `discover()` the new live dir.
+
+Three hard guards skip the refit before any work:
+
+| Guard | Skip reason | Why |
+|---|---|---|
+| `spike_active=True` | `"spike_active"` | A predictor-spike episode is open; refit during an outlier moment would over-fit the spike |
+| `hnsw_store.count() < 5000` | `"hnsw_count=N<5000"` | Index too sparse to validate a new embedding's parity meaningfully |
+| Post-fit `parity < 0.90` | `"parity_below_threshold"` | New embedding diverged too far from the old neighbourhood structure; old index kept |
+
+There is also a **hard-gate against `ChromaStore`** (v0.5.10) — the
+swap path renames `persist_dir` to `hnsw.backup`, which is only
+meaningful for an HnswStore. The function refuses with
+`"unsupported_store_ChromaStore"` rather than corrupt a chroma
+collection.
 
 ## How firing translates to actuator state
 
