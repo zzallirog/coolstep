@@ -248,6 +248,32 @@ fi
 # --------------------------------------------------------------------------- #
 _step "(2/6) venv / deps"
 
+# Detect whether coolstep is already installed via pipx / pip --user / AUR.
+# If so, skip the dev-style venv setup — re-creating .venv next to a pipx
+# install produces two parallel environments, and the unit's PATH points at
+# the pipx venv, not the dev one.
+INSTALLED_BIN="$(command -v coolstep 2>/dev/null || true)"
+INSTALLED_PY=""
+INSTALL_MODE=dev
+
+if [ -n "$INSTALLED_BIN" ]; then
+    REAL_BIN="$(readlink -f "$INSTALLED_BIN" 2>/dev/null || echo "$INSTALLED_BIN")"
+    case "$REAL_BIN" in
+        */pipx/venvs/coolstep/*)
+            INSTALL_MODE=pipx
+            INSTALLED_PY="${REAL_BIN%/bin/coolstep}/bin/python"
+            ;;
+        /usr/bin/*|/usr/local/bin/*)
+            INSTALL_MODE=system
+            INSTALLED_PY="$(command -v python3)"
+            ;;
+        *)
+            INSTALL_MODE=pip
+            INSTALLED_PY="$(command -v python3)"
+            ;;
+    esac
+fi
+
 VENV="$REPO_ROOT/.venv"
 PIP="$VENV/bin/pip"
 PYTHON="$VENV/bin/python"
@@ -257,7 +283,31 @@ _venv_has() {
     "$PYTHON" -c "import $1" 2>/dev/null
 }
 
-if [ -x "$PYTHON" ]; then
+_installed_has() {
+    [ -x "$INSTALLED_PY" ] && "$INSTALLED_PY" -c "import $1" 2>/dev/null
+}
+
+if [ "$INSTALL_MODE" != "dev" ]; then
+    _info "coolstep already installed ($INSTALL_MODE): $INSTALLED_BIN"
+    _info "skipping dev .venv creation — using the existing install"
+    if _installed_has chromadb && _installed_has numpy; then
+        _info "deps OK (ML extras present in $INSTALL_MODE install)"
+    else
+        _warn "ML extras (chromadb + numpy) missing from $INSTALL_MODE install"
+        case "$INSTALL_MODE" in
+            pipx)
+                _warn "  add via: pipx inject coolstep 'chromadb<1.0' 'chroma-hnswlib>=0.7.6'"
+                ;;
+            pip)
+                _warn "  add via: pip install --user --break-system-packages 'coolstep[ml]'"
+                ;;
+            system)
+                _warn "  install the appropriate AUR ml-extras package"
+                ;;
+        esac
+        _warn "  daemon will run without KNN predictor (MetaPredictor fallback)"
+    fi
+elif [ -x "$PYTHON" ]; then
     _info "venv exists: $VENV"
     if _venv_has chromadb && _venv_has numpy; then
         _info "deps OK (chromadb + numpy present)"
@@ -394,9 +444,19 @@ fi
 _step "(6/6) start + health"
 
 if [ "$DRY_RUN" = true ]; then
-    _info "(dry-run — would run: systemctl --user daemon-reload + restart coolstep-collector)"
+    _info "(dry-run — would run: coolstep install-units + daemon-reload + restart coolstep-collector)"
     _info "(would check: curl http://127.0.0.1:18889/api/health)"
 else
+    # Ensure unit files exist before we try to restart — running this wizard
+    # before `coolstep install-units` left users in the "Unit not found"
+    # state.  install-units is idempotent (`skipped (exists)` on re-run).
+    if [ -n "$INSTALLED_BIN" ]; then
+        _run "$INSTALLED_BIN" install-units
+    elif [ -x "$VENV/bin/coolstep" ]; then
+        _run "$VENV/bin/coolstep" install-units
+    else
+        _warn "no coolstep binary found — skipping install-units; restart may fail"
+    fi
     _run systemctl --user daemon-reload
     _run systemctl --user enable coolstep-collector.service 2>/dev/null || true
     _run systemctl --user restart coolstep-collector.service
