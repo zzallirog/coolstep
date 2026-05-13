@@ -17,10 +17,15 @@ until then `embed()` returns None (caller should skip vector write).
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 from coolstep.core.schema import TelemetryFrame
+
+log = logging.getLogger(__name__)
 
 FEATURE_NAMES: tuple[str, ...] = (
     "cpu_temp_max",
@@ -145,6 +150,49 @@ class Embedder:
             name: {"median": s.median, "mad": s.mad}
             for name, s in self._stats.items()
         }
+
+    def save_stats(self, path: Path) -> None:
+        """Persist median/MAD so a restarted daemon embeds compatibly with
+        vectors already in chroma. Without this, post-restart refit on a
+        different window skews normalization and breaks KNN consistency.
+        """
+        if not self._fitted:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "feature_names": list(FEATURE_NAMES),
+            "stats": self.stats_snapshot(),
+        }
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, separators=(",", ":")))
+        tmp.replace(path)
+
+    def load_stats(self, path: Path) -> bool:
+        """Return True if stats loaded и embedder помечен fitted. False иначе
+        (file отсутствует, corrupt, или схема feature_names разъехалась)."""
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("embedder stats load failed: %r", exc)
+            return False
+        names = tuple(payload.get("feature_names", []))
+        if names != FEATURE_NAMES:
+            log.warning(
+                "embedder stats schema mismatch — refusing to load "
+                "(saved=%d names, current=%d)",
+                len(names), len(FEATURE_NAMES),
+            )
+            return False
+        stats = payload.get("stats", {})
+        for name in FEATURE_NAMES:
+            row = stats.get(name) or {}
+            median = float(row.get("median", 0.0))
+            mad = float(row.get("mad", 1.0)) or 1.0
+            self._stats[name] = _Stat(median=median, mad=mad)
+        self._fitted = True
+        return True
 
     def embed(self, frame: TelemetryFrame) -> list[float] | None:
         if not self._fitted:

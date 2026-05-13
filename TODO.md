@@ -6,6 +6,72 @@
 > + **hw matrix harness** landed 2026-05-12 — see
 > `docs/interference-matrix.md` + `docs/hw-matrix.md`.
 
+## Phase P2.8 — Memory layers sync (started 2026-05-13)
+
+Operator framing (design session 2026-05-13):
+
+> «Важно настроить синхронизацию между двумя типами памяти и важности
+> каждого отдельного. Но основной — больший. Он умнее. Короткий всего
+> лишь ищет нарративы, и пробует угадать.»
+
+Three memory layers exist, weakly coupled:
+
+| Layer | Storage | TTL | Role |
+|---|---|---|---|
+| LONG  | store.db + chroma KNN     | unbounded | smart archive, day/night, workload signatures |
+| MED   | residual-state.jsonl      | rolling N | bucketed meta-correction (4 axes coarse) |
+| SHORT | in-memory Ring + Newton τ | ~60s      | cockpit slope extrapolation |
+
+Goal: connect them with confidence-weighted fusion so the long-term
+archive dominates when it has a similar moment, short-term fills the
+gap when archive is sparse, and meta-bucket bridges the cold-start
+window.
+
+### P2.8.0 — Warm-start reindex helper ✅ DONE 2026-05-13
+- [x] `scripts/reindex_chroma_from_store.py` — sqlite frames →
+      reconstruct TelemetryFrame → embedder.embed → chroma.add →
+      backfill labels via `throttle_events`. One-shot, idempotent
+      (skip ts already in chroma).  Useful после первого fit'a
+      чтобы прогреть index из существующего store.db.
+- [x] **Embedder stats persistence** — `Embedder.save_stats()` /
+      `load_stats()` write median/MAD per feature into
+      `data/embedder-stats.json`. Daemon loads on boot and freezes
+      refits while the file is present, so vectors в chroma и live
+      query всегда живут в одном embedding space across restarts.
+
+### P2.8.1 — Fingerprint axes «когда» (P1, 1-2 days)
+- [ ] `core/fingerprint.py`:
+  - `hour_of_day` / `weekday` — циркулярные sin/cos pairs
+  - `seconds_since_workload_change` — Ring track active class
+  - `recent_idle_ratio_300s` — % фреймов cpu_load_max<10% за 5 мин
+  - `compile_marker` — active_class ∈ {kitty, code, zen} AND
+    rapl_pkg_jump > 20W/5s
+- [ ] tests + docs/workload-fingerprint.md + bump core/CLAUDE.md
+- *Why: KNN сам научится «открыл zen в 14:00 на холодном CPU → 5мин
+  ramp 88°C» без эвристик. Все сигналы уже в raw frames.*
+
+### P2.8.2 — Confidence-weighted fusion (P2, 1 day)
+- [ ] `MetaPredictor.predict()` → mix формула:
+  ```
+  ΔT = w_long·KNN + w_med·meta_bucket + w_short·newton
+  w_long  = sigmoid(neighbours_dist · n_samples_in_bucket)
+  w_med   = sigmoid(n_samples_in_bucket / 100) · (1 - w_long)
+  w_short = sigmoid(slope_persistence_3s)
+  Σ weights → normalize to 1
+  ```
+- [ ] Каждый слой возвращает (estimate, self_confidence)
+- [ ] Логировать dominant layer в ml-state.json:reason
+- [ ] tests/test_meta_predictor.py
+- *Why: «sync + priority» из запроса юзера 2026-05-13.*
+
+### P2.8.3 — Snapshot archive trigger (P3, 0.5 day)
+- [ ] `core/snapshot_archive.py` уже написан в P2.5, daemon trigger не wired
+- [ ] Trigger: throttle event closed OR `predictor_spike` max|res| > 15°C
+- [ ] Write: peak_ts + 60s контекст → `data/snapshots/<ts>.json`
+- [ ] Retention: rotate после 200 файлов ИЛИ 7 дней (whichever first)
+- [ ] `GET /api/snapshots` — galler-list для dashboard tile (P3.5)
+- *Why: «идеально вижу snapshot состояния» — галерея эталонных эпизодов.*
+
 ## Phase P2.7 — Spike-driven training archive (started 2026-05-12)
 
 Operator framing (live speedtest observation):
@@ -130,6 +196,7 @@ audit pending.  Items below are what's still missing.
   "cooling −6° / 30s" — formally true (slope·30s), reads as "safe"
   while chip is on a plateau peak.  Branch order in `_trend()`:
   check `T ≥ knee` BEFORE `s < 0` so the urgent state wins.
+  (See shot-02 in /tmp/cockpit-shots/ from 2026-05-12 stress run.)
 
 ## Phase P2.5 followup (the live list)
 

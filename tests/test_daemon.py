@@ -124,7 +124,10 @@ def test_daemon_writes_ml_state_snapshot(daemon_factory, tmp_path):
     assert state_path.exists()
     import json
     snap = json.loads(Path(state_path).read_text())
-    assert snap["model_name"] in {"always_idle_baseline", "trajectory_baseline", "knn_v1"}
+    assert snap["model_name"] in {
+        "always_idle_baseline", "trajectory_baseline", "knn_v1",
+        "trajectory_baseline+meta", "knn_v1+meta",
+    }
     assert snap["calibration_ready"] is False
     assert "fake" in snap["collectors"]
 

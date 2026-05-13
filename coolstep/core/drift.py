@@ -119,7 +119,9 @@ def evaluate(ml_state_path: Path, history_path: Path | None = None) -> DriftRepo
             recent_count = sum(h["chroma_count"] for h in recent) / len(recent)
             base_count = sum(h["chroma_count"] for h in baseline) / len(baseline)
             growth = recent_count - base_count
-            if growth < 1 and len(recent) > 1:
+            # base_count > 0: иначе фиксируем «disabled», а не drift
+            # (Chroma может быть выключена через COOLSTEP_CHROMA_DISABLED — ADR P2.5).
+            if growth < 1 and len(recent) > 1 and base_count > 0:
                 indicators.append(
                     DriftIndicator("chroma_no_growth", severity=0.6,
                                    note=f"chroma_count flat at {recent_count:.0f}",

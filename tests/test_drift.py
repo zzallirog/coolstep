@@ -116,3 +116,15 @@ def test_evaluate_chroma_no_growth_flagged(tmp_path):
     rep = evaluate(state, history)
     names = [i.name for i in rep.indicators]
     assert "chroma_no_growth" in names
+
+
+def test_evaluate_chroma_disabled_no_false_positive(tmp_path):
+    """Chroma fully disabled (count=0 forever) must NOT fire chroma_no_growth."""
+    history = tmp_path / "h.jsonl"
+    state = tmp_path / "ml.json"
+    for _ in range(10):
+        append_history(history, {"throttle_prob": 0.0, "confidence": 0.5, "chroma_count": 0})
+    _write_state(state, chroma_count=0, model_name="trajectory_baseline+meta")
+    rep = evaluate(state, history)
+    names = [i.name for i in rep.indicators]
+    assert "chroma_no_growth" not in names

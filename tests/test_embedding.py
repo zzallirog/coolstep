@@ -89,3 +89,51 @@ def test_stats_snapshot_serializable():
     assert set(snap.keys()) == set(FEATURE_NAMES)
     for s in snap.values():
         assert "median" in s and "mad" in s
+
+
+def test_save_load_stats_roundtrip(tmp_path):
+    """Persistent stats: saved → loaded → embed deterministic across processes.
+
+    Это инвариант warm-start reindex: vectors в chroma и query от daemon
+    должны совпадать byte-for-byte при том же сэмпле.
+    """
+    src = Embedder(min_frames_to_fit=10)
+    src.refit([_frame(float(t), tctl=60.0 + t, load=10 + t * 5) for t in range(20)])
+    assert src.fitted
+
+    path = tmp_path / "embedder-stats.json"
+    src.save_stats(path)
+    assert path.exists()
+
+    dst = Embedder(min_frames_to_fit=10)
+    assert not dst.fitted
+    assert dst.load_stats(path) is True
+    assert dst.fitted
+
+    test_frame = _frame(100.0, tctl=78.0, load=50.0)
+    v_src = src.embed(test_frame)
+    v_dst = dst.embed(test_frame)
+    assert v_src is not None and v_dst is not None
+    for a, b in zip(v_src, v_dst, strict=True):
+        assert abs(a - b) < 1e-12
+
+
+def test_load_stats_missing_file_no_crash(tmp_path):
+    emb = Embedder(min_frames_to_fit=10)
+    assert emb.load_stats(tmp_path / "absent.json") is False
+    assert not emb.fitted
+
+
+def test_load_stats_corrupt_file_returns_false(tmp_path):
+    path = tmp_path / "embedder-stats.json"
+    path.write_text("{not json")
+    emb = Embedder(min_frames_to_fit=10)
+    assert emb.load_stats(path) is False
+    assert not emb.fitted
+
+
+def test_save_unfitted_no_op(tmp_path):
+    emb = Embedder(min_frames_to_fit=10)
+    path = tmp_path / "embedder-stats.json"
+    emb.save_stats(path)
+    assert not path.exists()

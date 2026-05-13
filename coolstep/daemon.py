@@ -141,6 +141,15 @@ class Daemon:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("ensure_enabled failed for %s: %r", actuator.name, exc)
         self.embedder = Embedder()
+        # Persisted embedder stats survive restarts so newly-embedded
+        # frames stay comparable with vectors already in chroma. Without
+        # this, daemon would refit on the post-restart ring window and
+        # the normalization (median/MAD) skews vs archive → KNN broken.
+        self._embedder_stats_path = home / "embedder-stats.json"
+        self._embedder_stats_locked = self.embedder.load_stats(self._embedder_stats_path)
+        if self._embedder_stats_locked:
+            log.info("embedder: loaded persisted stats from %s — refits frozen",
+                     self._embedder_stats_path.name)
         self.chroma = ChromaStore()
         self.chroma.discover()
         if self.chroma.available:
@@ -1185,10 +1194,22 @@ class Daemon:
         self.calibration_ready = report.ready
 
     def _refit_embedder(self) -> None:
-        """Refresh per-feature stats over the rolling ring window."""
+        """Refresh per-feature stats over the rolling ring window.
+
+        Locked when stats loaded from disk on boot — иначе daemon
+        rewrite'нет статистику reindex-скрипта (всего архива) более
+        узкой ring window (~10 min) и embeddings разъедутся с уже
+        существующими в chroma vectors. Unlock = удалить embedder-stats.json.
+        """
+        if self._embedder_stats_locked:
+            return
         window = self.ring.window(self.ring.capacity)
         if len(window) >= self.embedder.min_frames_to_fit:
             self.embedder.refit(window)
+            try:
+                self.embedder.save_stats(self._embedder_stats_path)
+            except OSError as exc:
+                log.warning("embedder stats persist failed: %r", exc)
 
     def _chroma_write(self, frame: TelemetryFrame) -> None:
         if not self.chroma.available:

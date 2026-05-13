@@ -8,6 +8,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-05-13
+
+Memory sync hotfix: weight handling between the long-term archive (KNN)
+and short-term cockpit (trajectory) predictors, plus persistence so
+both tiers stay synchronized across daemon restarts.
+
+### Added
+
+- **`Embedder.save_stats()` / `Embedder.load_stats()`** in
+  `coolstep/core/embedding.py` persist per-feature median/MAD
+  normalization to `data/embedder-stats.json`. Daemon reloads on
+  boot so newly-embedded frames share the same vector space as
+  vectors already in the chroma index.
+- **`scripts/reindex_chroma_from_store.py`** — one-shot helper that
+  rebuilds the chroma index from `store.db.frames` end-to-end:
+  reconstructs `TelemetryFrame` from `raw_json`, embeds, writes to
+  chroma, then calls `backfill_labels` against `throttle_events`.
+  Idempotent — skips ids already present.
+- Tests: `test_save_load_stats_roundtrip` (byte-for-byte vectors
+  across `Embedder` instances), missing/corrupt stats handling,
+  and the disabled-feature path in the drift detector
+  (`test_evaluate_chroma_disabled_no_false_positive`).
+
+### Changed
+
+- **`coolstep/daemon.py`** loads embedder stats on boot
+  (`_embedder_stats_locked` flag); `_refit_embedder()` skips when
+  persistent stats are present so refits don't drift the
+  normalization away from the existing index. Remove
+  `data/embedder-stats.json` to re-enable adaptation.
+- **`coolstep/core/drift.py`** — `chroma_no_growth` indicator now
+  gates on `base_count > 0`, so a never-grown store reads as
+  «disabled feature», not drift.
+
+### Fixed
+
+- chromadb venv installation aligned with `pyproject.toml`
+  constraint (`>=0.5,<1.0`) on Python 3.14 — matches the spec
+  already in the source tree.
+
 ## [0.5.5] — 2026-05-12
 
 Documentation + visual refresh on top of v0.5.4.  No runtime behaviour
