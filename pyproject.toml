@@ -65,6 +65,7 @@ exclude = ["tests*", "docs*", "data*"]
 
 [tool.setuptools.package-data]
 "coolstep.compat" = ["core.json"]
+"coolstep._resources" = ["cleanup.sh"]
 "coolstep.dashboard" = [
     "static/*.html",
     "static/*.css",

@@ -13,6 +13,9 @@ the fallback path for non-AUR installs.
 from __future__ import annotations
 
 import os
+import shutil
+import stat
+from importlib import resources
 from pathlib import Path
 
 _COLLECTOR_UNIT = """\
@@ -43,12 +46,11 @@ PrivateTmp=true
 Environment=COOLSTEP_HOME=%h/coolstep/data
 Environment=PYTHONUNBUFFERED=1
 
-# Cleanup script is optional (`-` prefix ignores exit code on missing file).
-# AUR builds ship the script at /usr/lib/coolstep/cleanup.sh; this template
-# falls back to the maintainer dev location.  Python's `try/finally` in
-# daemon.run() is the primary revert path; this is the SIGKILL/OOM belt.
+# Cleanup script — install() copies it from the wheel into
+# `~/.local/share/coolstep/cleanup.sh` so this path resolves on pipx/pip
+# installs.  `-` prefix ignores exit code; Python's try/finally in
+# daemon.run() is the primary revert path, this is the SIGKILL/OOM belt.
 ExecStopPost=-%h/.local/share/coolstep/cleanup.sh
-ExecStopPost=-/usr/lib/coolstep/cleanup.sh
 
 [Install]
 WantedBy=default.target
@@ -101,6 +103,33 @@ def _data_dir() -> Path:
     return Path.home() / "coolstep" / "data"
 
 
+def _cleanup_target() -> Path:
+    # Matches `ExecStopPost=-%h/.local/share/coolstep/cleanup.sh` in the
+    # collector unit template.
+    return Path.home() / ".local" / "share" / "coolstep" / "cleanup.sh"
+
+
+def _install_cleanup_script() -> tuple[str, str]:
+    """Copy bundled cleanup.sh out of the wheel onto disk, chmod 0755.
+
+    Returns (target, status) where status is `written`, `replaced`, or
+    `missing (wheel resource)`.  The unit's `-` prefix on ExecStopPost
+    tolerates a missing file, so a failure here is non-fatal.
+    """
+    target = _cleanup_target()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        src = resources.files("coolstep._resources").joinpath("cleanup.sh")
+        with resources.as_file(src) as path:
+            existed = target.exists()
+            shutil.copyfile(path, target)
+            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            return (str(target), "replaced" if existed else "written")
+    except (FileNotFoundError, ModuleNotFoundError):
+        return (str(target), "missing (wheel resource)")
+
+
 def install(force: bool = False) -> list[tuple[str, str]]:
     """Write systemd unit files for the current user.
 
@@ -120,6 +149,8 @@ def install(force: bool = False) -> list[tuple[str, str]]:
     else:
         data.mkdir(parents=True, exist_ok=True)
         results.append((str(data), "created"))
+
+    results.append(_install_cleanup_script())
 
     target = _unit_dir()
     target.mkdir(parents=True, exist_ok=True)
