@@ -32,6 +32,7 @@ from typing import Protocol
 
 from coolstep.core.predictor import Prediction
 from coolstep.core.residual_meta import (
+    BucketKey,
     ResidualBank,
     bucket_of,
     compose_confidence,
@@ -120,7 +121,7 @@ class MetaPredictor:
             ),
         )
 
-    def bucket(self, features: dict[str, float]) -> tuple[int, int, int, int]:
+    def bucket(self, features: dict[str, float]) -> BucketKey:
         """Expose bucket-of-features so the daemon can stamp it onto the
         ResidualRecord at validation time."""
         return bucket_of(features)

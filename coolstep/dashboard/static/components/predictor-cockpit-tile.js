@@ -32,6 +32,51 @@ export class PredictorCockpitTile extends LitElement {
     css`
       :host { grid-column: span 2; }
 
+      /* Masthead truncation fix (2026-05-13 — operator: «верхняя шапка
+         странно выглядит на разных масштабах»).  The frame header uses
+         a 3-column grid (FIG, title, meta) — meta now bundles horizon
+         toggle + pin-count toggle + spike chip + 2 acc chips, which
+         shoves col 3 wide enough that the italic serif title gets
+         ellipsis-truncated to "Predict...".  Override at host: when
+         the tile is narrower than ~860px (container query), let the
+         header wrap so title gets its own row above the meta block.
+         At ≥ 860px the original 3-col grid is preserved. */
+      header { row-gap: 6px; column-gap: var(--sp-3, 16px); }
+      header h2 {
+        white-space: normal !important;  /* let title breathe instead of … */
+        text-overflow: clip !important;
+      }
+      @container (max-width: 860px) {
+        header {
+          grid-template-columns: auto 1fr;
+        }
+        header .meta {
+          grid-column: 1 / -1;
+          justify-self: stretch;
+          align-self: flex-start;
+        }
+      }
+      .acc-stack {
+        flex-wrap: wrap;
+        row-gap: 4px;
+      }
+      /* Compact mode (2026-05-13 — operator: «ошибки спрыгивают вниз при
+         120%»).  At narrow container widths (zoomed-in or short screens)
+         the ±err chips' uppercase labels eat enough room to force a wrap
+         onto a second row.  Drop the labels and tighten padding so the
+         numeric value stands alone — the colour band and tooltip still
+         carry the meaning. */
+      @container (max-width: 760px) {
+        .acc-chip { padding: 2px 6px; }
+        .acc-chip .lbl { display: none; }
+        .acc-chip .v { font-size: 11px; }
+        .hz-toggle { padding: 2px 4px 2px 8px; }
+        .hz-toggle .hz-lbl { display: none; }
+        .hz-seg { padding: 2px 6px; font-size: 10px; }
+        .spike-chip .lbl { font-size: 8px; }
+        .spike-chip { padding: 2px 6px; }
+      }
+
       .hero { gap: var(--sp-4, 24px); }
 
       /* P2.9.5 — soften per-tick jitter.  Hero metric numbers re-render
@@ -282,6 +327,16 @@ export class PredictorCockpitTile extends LitElement {
         border-top: 1px dashed color-mix(in srgb, var(--cat-cooling, #7be0d4) 60%, transparent);
         border-bottom: 1px dashed color-mix(in srgb, var(--cat-cooling, #7be0d4) 60%, transparent);
       }
+      .legend .sw.phys {
+        background: linear-gradient(to right,
+          var(--fg-dim, #5b6678) 0 4px,
+          transparent 4px 7px,
+          var(--fg-dim, #5b6678) 7px 11px,
+          transparent 11px 14px,
+          var(--fg-dim, #5b6678) 14px 18px,
+          transparent 18px 22px);
+        opacity: 0.7;
+      }
       /* Hollow rings — three colour stops match the residual-trail
          tokens below.  Use circles instead of stripes so the eye links
          them directly to the ghost-dots on the canvas. */
@@ -331,6 +386,31 @@ export class PredictorCockpitTile extends LitElement {
         padding: 4px 6px;
       }
       .bucket-strip strong { color: var(--fg); font-weight: 600; }
+
+      .refresh-health {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-family: var(--font-mono, monospace);
+        font-size: 10px;
+        color: var(--fg-muted);
+        padding-top: 3px;
+        opacity: 0.7;
+      }
+      .refresh-health strong { color: var(--fg); font-weight: 600; }
+      .refresh-health.stale { color: var(--warn); opacity: 1; }
+      .refresh-health.stale strong { color: var(--warn); }
+      .refresh-health .inflight {
+        color: var(--cat-cooling, #7be0d4);
+        animation: refresh-pulse 1.4s ease-in-out infinite;
+      }
+      .refresh-health .trust { letter-spacing: 0.5px; }
+      .refresh-health .trust-prior     { color: var(--fg-muted); opacity: 0.55; }
+      .refresh-health .trust-shrunk    { color: var(--cat-warming, #d8a36b); }
+      .refresh-health .trust-confident { color: var(--cat-cooling, #7be0d4); }
+      @keyframes refresh-pulse {
+        50% { opacity: 0.45; }
+      }
     `,
   ];
 
@@ -350,10 +430,27 @@ export class PredictorCockpitTile extends LitElement {
   static HORIZON_DEFAULT = 5;
   static HORIZON_STORAGE_KEY = 'coolstep:cockpit:horizon';
 
+  /* Operator 2026-05-13: 12 pins was too many — visual noise.  Keep
+     selectable 3/5/10 so user can dial signal-vs-context.  10 max. */
+  static PIN_COUNTS = [3, 5, 10];
+  static PIN_COUNT_DEFAULT = 5;
+  static PIN_COUNT_STORAGE_KEY = 'coolstep:cockpit:pinCount';
+
+  /* Past-window scope (seconds) — operator 2026-05-13: «пины по сей день
+     за -30 сек, а должны казаться актуальными. с возможностью расширения
+     скоупа».  30s default keeps recent past close; 60/120 lets the
+     operator look further back without rebinning manually.  Canvas
+     X-axis spans [-scope, +T_FUT]. */
+  static SCOPES = [30, 60, 120];
+  static SCOPE_DEFAULT = 30;
+  static SCOPE_STORAGE_KEY = 'coolstep:cockpit:scope';
+
   static properties = {
     state: { state: true },
     profileFlipHighlight: { state: true },
     activeHorizon: { state: true },
+    activePinCount: { state: true },
+    activeScope: { state: true },
     // P2.9.5 — display layer.  Hero numbers (live-now t, predicted) tween
     // toward the freshest fetched value via rAF, so a 13.9° → 7.5° flip
     // from a stale → fresh prediction glides instead of teleporting.
@@ -368,6 +465,8 @@ export class PredictorCockpitTile extends LitElement {
     this.profileFlipHighlight = false;
     this._prevProfileChangedAt = null;
     this.activeHorizon = this._loadHorizon();
+    this.activePinCount = this._loadPinCount();
+    this.activeScope = this._loadScope();
     this.displayT = null;
     this.displayPred = null;
     this._tweenStart = 0;
@@ -377,6 +476,18 @@ export class PredictorCockpitTile extends LitElement {
     this._tweenToPred = null;
     this._tweenRAF = null;
     this._tweenDurationMs = 400;  // glide window — feels reactive, not laggy
+    // Predicted-now extrapolation. When the daemon stalls (CPU-quota
+    // throttle, store rotate, deep _backfill_labels), ml-state.json
+    // doesn't refresh for 1-3 s. Without this, the hero numerals freeze
+    // on screen and the operator sees "тикает, потом думает". With it,
+    // displayT keeps moving along the last known slope vector — so the
+    // dial breathes even when the underlying data is paused. Δ clamped
+    // to ±2 °C so a noisy slope can't drift the dial into fantasy land.
+    this._extrapBaseT = null;
+    this._extrapBaseSlope = 0;
+    this._extrapBaseAt = 0;
+    this._extrapRAF = null;
+    this._extrapMaxDelta = 2.0;
   }
 
   /* Cubic ease-out for the tween — fast start, soft landing. */
@@ -406,10 +517,37 @@ export class PredictorCockpitTile extends LitElement {
           this._tweenRAF = requestAnimationFrame(step);
         } else {
           this._tweenRAF = null;
+          // Tween landed — capture extrapolation base from the just-
+          // settled values + the current slope. Extrapolation loop picks
+          // it up next frame.
+          this._extrapBaseT = this._tweenToT;
+          this._extrapBaseSlope = Number(this.state?.current?.slope) || 0;
+          this._extrapBaseAt = performance.now();
         }
       };
       this._tweenRAF = requestAnimationFrame(step);
     }
+  }
+
+  /* Linear forward extrapolation of displayT along the last observed
+     slope vector. Runs continuously after the tile mounts; pauses while
+     a tween is animating (tween wins for the 400 ms glide window).
+     Δ clamped to ±_extrapMaxDelta so a stale, noisy slope can't push
+     the dial off the chart. */
+  _startExtrapolation() {
+    if (this._extrapRAF != null) return;
+    const step = () => {
+      if (this._stopped) { this._extrapRAF = null; return; }
+      if (this._tweenRAF == null && this._extrapBaseT != null) {
+        const dt_s = (performance.now() - this._extrapBaseAt) / 1000;
+        const raw = this._extrapBaseSlope * dt_s;
+        const clamped = Math.max(-this._extrapMaxDelta,
+                                 Math.min(this._extrapMaxDelta, raw));
+        this.displayT = this._extrapBaseT + clamped;
+      }
+      this._extrapRAF = requestAnimationFrame(step);
+    };
+    this._extrapRAF = requestAnimationFrame(step);
   }
 
   _loadHorizon() {
@@ -426,6 +564,40 @@ export class PredictorCockpitTile extends LitElement {
     try { localStorage.setItem(PredictorCockpitTile.HORIZON_STORAGE_KEY, String(h)); }
     catch (_) { /* no-op */ }
     this.updateComplete.then(() => this._draw());
+  }
+
+  _loadPinCount() {
+    try {
+      const v = parseInt(localStorage.getItem(PredictorCockpitTile.PIN_COUNT_STORAGE_KEY) || '', 10);
+      if (PredictorCockpitTile.PIN_COUNTS.includes(v)) return v;
+    } catch (_) { /* localStorage may be blocked */ }
+    return PredictorCockpitTile.PIN_COUNT_DEFAULT;
+  }
+
+  _setPinCount(n) {
+    if (!PredictorCockpitTile.PIN_COUNTS.includes(n)) return;
+    this.activePinCount = n;
+    try { localStorage.setItem(PredictorCockpitTile.PIN_COUNT_STORAGE_KEY, String(n)); }
+    catch (_) { /* no-op */ }
+    this.updateComplete.then(() => this._draw());
+  }
+
+  _loadScope() {
+    try {
+      const v = parseInt(localStorage.getItem(PredictorCockpitTile.SCOPE_STORAGE_KEY) || '', 10);
+      if (PredictorCockpitTile.SCOPES.includes(v)) return v;
+    } catch (_) { /* localStorage may be blocked */ }
+    return PredictorCockpitTile.SCOPE_DEFAULT;
+  }
+
+  _setScope(s) {
+    if (!PredictorCockpitTile.SCOPES.includes(s)) return;
+    this.activeScope = s;
+    try { localStorage.setItem(PredictorCockpitTile.SCOPE_STORAGE_KEY, String(s)); }
+    catch (_) { /* no-op */ }
+    // Scope change → refetch + redraw (server bins residuals by scope).
+    this._lastDrawSig = null;
+    this._refresh().then(() => this._draw());
   }
 
   /* Resolve the predicted temperature for the active horizon — prefers
@@ -460,6 +632,7 @@ export class PredictorCockpitTile extends LitElement {
     super.connectedCallback();
     this._stopped = false;
     this._scheduleRefresh(0);
+    this._startExtrapolation();
   }
 
   disconnectedCallback() {
@@ -467,6 +640,7 @@ export class PredictorCockpitTile extends LitElement {
     this._stopped = true;
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     if (this._tweenRAF) { cancelAnimationFrame(this._tweenRAF); this._tweenRAF = null; }
+    if (this._extrapRAF) { cancelAnimationFrame(this._extrapRAF); this._extrapRAF = null; }
   }
 
   /* Self-rescheduling timer (replaces setInterval).  setInterval drifts
@@ -493,18 +667,21 @@ export class PredictorCockpitTile extends LitElement {
       }
       if (this._stopped) return;
       const elapsed = performance.now() - startedAt;
-      // 10Hz target (operator request 2026-05-13 — btop-class realtime).
-      // Daemon ticks 100ms; ml-state.json atomic-write is sub-ms; backend
-      // serves cached chroma stats so /api/predictor-cockpit returns in
-      // a few ms.  CSS transitions 80ms (below) so values feel reactive.
-      const PERIOD = 100;
-      const nextDelay = Math.max(20, PERIOD - elapsed);
+      // 2 Hz fetch (operator: 2026-05-13 — «не realtime, да 2 секунды»).
+      // The canvas redraws once per fetch via `_refresh` → `_draw` (no
+      // rAF pump — earlier drift approach left visible blanks between
+      // tail and the "now" line). Hero numerals still glide via
+      // `_kickTween` so the 2 s discreteness reads as breathing, not
+      // staleness. Also cuts FastAPI traffic 20× vs prior 100 ms.
+      const PERIOD = 2000;
+      const nextDelay = Math.max(50, PERIOD - elapsed);
       this._scheduleRefresh(nextDelay);
     }, delay);
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/predictor-cockpit', null);
+    const scope = this.activeScope || PredictorCockpitTile.SCOPE_DEFAULT;
+    const data = await fetchJson(`/api/predictor-cockpit?scope_s=${scope}`, null);
     if (!data) return;
     const newChangedAt = data.profile_changed_at;
     if (
@@ -517,7 +694,11 @@ export class PredictorCockpitTile extends LitElement {
     }
     this._prevProfileChangedAt = newChangedAt;
     this.state = data;
-    // P2.9.5: skip canvas repaint when data hasn't materially changed.
+    // Draw on fetch — 2 Hz polling means at most one repaint every 2 s,
+    // which is cheap and preserves the v0.5.4 visual model the operator
+    // confirmed worked ("раньше он не виснул", 2026-05-13). Earlier rAF
+    // pump + wall-clock drift left a visible blank between the trail
+    // tail and the "now" line as drift accumulated — reverted.
     const cur = data?.current || {};
     const trail = data?.actual_trail || [];
     const tail = trail.length ? trail[trail.length - 1] : null;
@@ -610,18 +791,31 @@ export class PredictorCockpitTile extends LitElement {
     const palette = this._palette();
     const { cool, warn, err, dim, grid } = palette;
 
-    // Time-series ranges. X: −30s … +Ns (35-60s span). Y: 40°C … 95°C.
+    // Time-series ranges. X: −T_PAST … +Ns. Y: 40°C … 95°C.
     // T_FUT respects the active horizon toggle (P2.9.3) so the canvas
     // visually matches the Δ block — predicted endpoint sits exactly on
     // the right edge of the chart whether user picked +5s, +15s, or +30s.
-    const T_PAST = 30;
+    // T_PAST stretches to fit the predictor's native horizon (regression
+    // 2026-05-13): past-prediction pins land at t_pred = −horizon_sec
+    // (a guess made `horizon_sec` ago, just now validated). When the
+    // model runs at horizon_sec=30 but the canvas past window was hardcoded
+    // to 30, pins clustered exactly on the left edge or fell off entirely.
+    // Add an 8s buffer so the freshly-validated pin always lands inside
+    // the visible past area.
+    const horizonSec = this.state?.current?.horizon_sec || 30;
+    // T_PAST is now operator-controlled via scope toggle (30/60/120 s);
+    // canvas X-axis grows to match.  Keeps a floor of horizon+8 so the
+    // freshly-validated pin always lands inside the visible window even
+    // when scope is at its minimum.
+    const scopeSec = this.activeScope || PredictorCockpitTile.SCOPE_DEFAULT;
+    const T_PAST = Math.max(scopeSec, horizonSec + 8);
     const T_FUT  = this.activeHorizon || 5;
     const X_SPAN = T_PAST + T_FUT;
     const Y_MIN = 40, Y_MAX = 95;
     const PAD_L = 36, PAD_R = 8, PAD_T = 8, PAD_B = 18;
     const innerW = w - PAD_L - PAD_R;
     const innerH = h - PAD_T - PAD_B;
-    const toX = (t) => PAD_L + ((t + T_PAST) / X_SPAN) * innerW;  // t=−30..+5
+    const toX = (t) => PAD_L + ((t + T_PAST) / X_SPAN) * innerW;
     const toY = (T) => PAD_T + (1 - (T - Y_MIN) / (Y_MAX - Y_MIN)) * innerH;
 
     // Grid + axis labels — temperature ticks every 10°C, time ticks at −30, −15, 0, +5.
@@ -647,7 +841,14 @@ export class PredictorCockpitTile extends LitElement {
     const futureTicks = T_FUT >= 30 ? [10, 20, T_FUT]
                       : T_FUT >= 15 ? [5, 10, T_FUT]
                       : [T_FUT];
-    for (const t of [-30, -15, 0, ...futureTicks]) {
+    // Past ticks adapt to scope: 3 evenly-spaced marks across the window
+    // so the X-axis stays readable at scope=30, 60, 120 without crowding.
+    const pastTickStep = Math.max(10, Math.round(T_PAST / 3 / 5) * 5);
+    const pastTicks = [];
+    for (let t = -pastTickStep; t >= -T_PAST + 1; t -= pastTickStep) {
+      pastTicks.push(t);
+    }
+    for (const t of [...pastTicks, 0, ...futureTicks]) {
       const x = toX(t);
       ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, h - PAD_B); ctx.stroke();
       const lbl = t === 0 ? 'now' : t > 0 ? `+${t}s` : `${t}s`;
@@ -686,6 +887,18 @@ export class PredictorCockpitTile extends LitElement {
     const trail = (this.state.actual_trail || [])
       .slice()
       .sort((a, b) => b.ts_ago - a.ts_ago);
+    // 2-point EMA smoothing on the drawn polyline.  Raw samples at 10Hz
+    // jitter visibly when the chip oscillates ±0.5°C between consecutive
+    // sysfs reads.  α=0.4 is a soft pull (more weight on the new sample,
+    // small carry from prior) — keeps the line responsive to a real load
+    // jump while suppressing single-sample noise. We mutate copies of the
+    // points, not the original state, so the numeric residual trail below
+    // (which the operator reads as ground truth) is untouched.
+    for (let i = 1; i < trail.length; i++) {
+      const cur = trail[i], prev = trail[i - 1];
+      if (cur.t == null || prev.t == null) continue;
+      trail[i] = { ...cur, t: 0.4 * cur.t + 0.6 * prev.t };
+    }
     if (trail.length >= 2) {
       ctx.strokeStyle = warn;
       ctx.lineWidth = 1.8;
@@ -716,7 +929,12 @@ export class PredictorCockpitTile extends LitElement {
       // does — and rescale so T(horizon) == cur.predicted.  When meta
       // correction is zero this collapses to the original raw form, so
       // calibrated-bucket behaviour is unchanged.
-      const T0 = cur.t;
+      // Anchor the saturation curve on the *tweened* current temperature
+      // (displayT) when available so the envelope's left endpoint, the
+      // trail's tail-extension, and the gold "now" dot all sit at the
+      // same pixel between fetches. Falls back to the raw cur.t value
+      // before the first tween lands.
+      const T0 = this.displayT ?? cur.t;
       const tau = 4.0;
       const horizon = T_FUT;
       // Saturation factor at the horizon — denominator for normalising
@@ -774,10 +992,42 @@ export class PredictorCockpitTile extends LitElement {
       ctx.stroke();
       ctx.restore();
 
-      // Predicted endpoint marker.
-      if (cur.predicted != null) {
+      // Physics baseline overlay (2026-05-13 — operator: «не вижу корреляции»).
+      // Same saturation form но anchored on raw short slope (TrajectoryBaseline),
+      // не на KNN+meta. Юзер видит куда указывает чистая физика: если grey
+      // совпадает с teal — KNN согласен с slope; если разъезжаются — KNN
+      // нашёл в архиве что-то нетривиальное. Без gate, без замены — second
+      // opinion side-by-side. tau тот же 4s.
+      const slope_raw = Number(cur.slope) || 0;
+      const slope_clamped = Math.max(-3, Math.min(3, slope_raw));
+      const physPoints = [];
+      for (let i = 0; i <= 24; i++) {
+        const t = (i / 24) * horizon;
+        const f = 1 - Math.exp(-t / tau);
+        const T = T0 + slope_clamped * tau * f;
+        physPoints.push([t, Math.max(Y_MIN, Math.min(Y_MAX, T))]);
+      }
+      ctx.save();
+      ctx.strokeStyle = dim;
+      ctx.setLineDash([2, 3]);
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = 0.65;
+      ctx.beginPath();
+      for (const [t, T] of physPoints) {
+        const x = toX(t); const y = toY(T);
+        if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Predicted endpoint marker — pinned to the active-horizon forecast
+      // value so the ring sits at the end of the teal dashed curve, not at
+      // the legacy `cur.predicted` (h30) endpoint which floated 25°C above
+      // the visible line when h5 was the active tab (2026-05-13 fix).
+      const endpointT = activePred != null ? activePred : cur.predicted;
+      if (endpointT != null) {
         const xP = toX(T_FUT);
-        const yP = toY(Math.max(Y_MIN, Math.min(Y_MAX, cur.predicted)));
+        const yP = toY(Math.max(Y_MIN, Math.min(Y_MAX, endpointT)));
         ctx.strokeStyle = cool;
         ctx.lineWidth = 1.4;
         ctx.beginPath(); ctx.arc(xP, yP, 4, 0, Math.PI * 2); ctx.stroke();
@@ -793,55 +1043,126 @@ export class PredictorCockpitTile extends LitElement {
       ctx.beginPath(); ctx.arc(xN, yN, 3.5, 0, Math.PI * 2); ctx.fill();
     }
 
-    // Ghost dots: past predictions at (predicted_at_ago, predicted) with
-    // a thin segment to where they actually landed.  Coloured by
-    // |residual| using the same ok/warn/err thresholds as the token
-    // strip below the canvas.
+    // Past-prediction marks (v0.5.4 design restored 2026-05-13 — operator:
+    // «дизайн предиктов был хорош по миссам и хитам»). Each residual_trail
+    // entry is one validated prediction; we render two anchored points
+    // and a diagonal between them so the eye reads the miss as a single
+    // gestalt:
     //
-    // Limited to the 8 newest entries (the trail strip below already
-    // shows 12 as text) and faded by age — newest at full intensity,
-    // oldest at α=0.4 — so the cluster near `now` doesn't read as a
-    // single bright blob.  Operator-flagged 2026-05-12: under heavy
-    // load the canvas filled with 12+ overlapping rings.
-    // P2.9.4 polish — pin lifetime tied to display horizon (operator
-     // 2026-05-13: «раньше они исчезали через 15 сек, или через 10 или
-     // через 5»).  Earlier hotfix clamped pins to the left edge, which
-     // produced an ever-growing fan of red rays anchored at -T_PAST.
-     // The right idea: pin's visible age equals the active horizon, then
-     // it fades to nothing — same "memory window" as the forecast curve
-     // points to, so the cockpit reads consistently.  Quadratic alpha
-     // gives a soft tail (perceptually linear).
-    const rt = (this.state.residual_trail || []).slice(-8);
-    const lifetimeSec = this.activeHorizon;  // 5 / 15 / 30
-    ctx.save();
-    for (const r of rt) {
-      if (r.predicted_at_ago == null) continue;
-      const age = r.predicted_at_ago;
-      if (age > lifetimeSec) continue;        // expired — disappear
-      const t_pred = -age;
-      const t_act  = -r.ts_ago;
-      if (t_pred < -T_PAST) continue;          // off-screen guard
-      // Quadratic fade: α=1 at age=0 (newest), α≈0 at age=lifetime.
-      const u = age / lifetimeSec;
-      const fade = Math.max(0, (1 - u) * (1 - u));
-      const abs = Math.abs(r.residual);
-      const c = this._resHex(abs, palette);
-      const xP = toX(t_pred);
-      const yP = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.predicted)));
-      const xA = toX(t_act);
-      const yA = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.actual)));
-      // Connector — faint thread between "guessed here" and "landed there".
-      ctx.strokeStyle = c;
-      ctx.globalAlpha = 0.35 * fade;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(xP, yP); ctx.lineTo(xA, yA); ctx.stroke();
-      // Hollow ring on the prediction.  Slightly bigger for younger pins
-      // so the newest reads as the brightest pin on the canvas.
-      const ringR = 2.2 + 1.4 * (1 - u);
-      ctx.globalAlpha = 0.90 * fade;
-      ctx.beginPath(); ctx.arc(xP, yP, ringR, 0, Math.PI * 2); ctx.stroke();
+    //   • hollow ring at (t_pred, predicted) — "the model claimed this
+    //     temperature, made the call here in the past".  t_pred =
+    //     −predicted_at_ago, so older predictions sit further left.
+    //   • diagonal connector to (t_act, actual) where t_act = −ts_ago —
+    //     "here is where reality actually landed at validation time".
+    //     The length and angle of the connector visualise the miss:
+    //     vertical = pure under/over-shoot, slanted = the past horizon's
+    //     trajectory bias.
+    //
+    // Colour comes from `_resHex(|residual|)` (ok / warn / err thresholds
+    // shared with the textual residual trail below the canvas), so hits
+    // glow cool and misses glow hot. Newest entry α=1.0, oldest fades
+    // to 0.4 — keeps the cluster near "now" from reading as one bright
+    // blob (operator-flagged 2026-05-12).
+    //
+    // Limited to the 8 newest entries — the textual strip below already
+    // exposes 12 as numbers, so 8 on canvas keeps signal:noise sane.
+    // Past-prediction rendering — fan from now-dot (2026-05-13 v4).
+    //
+    //   Operator: «они должны тянуться от now dot, однако, не много.
+    //              максимум 10, и то на выбор юзера».
+    //
+    // Design: each ring sits at (t_act, predicted) — X = when verdict
+    // landed, Y = where KNN sat.  Connector goes from the now-dot
+    // (xN, yN) straight to that ring.  So every past prediction
+    // visually "tethers" to the current moment — fan-out shows
+    // residual direction (above now-dot = predicted hotter; below =
+    // predicted cooler).
+    //
+    // Why not connector-to-trail (v3): operator-flagged as wrong
+    // direction (red diagonals from past pins drowned out the gold
+    // trail).  Fan from now puts current-state at the centre of the
+    // visual story; each ring is a satellite past prediction relative
+    // to where we are now.
+    //
+    // Quota: user-selectable 3/5/10 via pin-count toggle.  10 cap
+    // prevents the canvas turning into a hairball when residual_trail
+    // accumulates fast.  Larger rings (r=4.5) so colour is legible.
+    const maxPins = this.activePinCount || PredictorCockpitTile.PIN_COUNT_DEFAULT;
+    // Take NEWEST N pins, not last N (which was oldest).  Backend returns
+    // residual_trail ordered newest→oldest by ts_ago bin; with slice(-N)
+    // PINS=3 surfaced the 3 OLDEST validations, leaving the user staring
+    // at 40-second-old marks when "pin count = 3" really meant "show me
+    // the 3 most recent" (2026-05-13 operator framing: «если их 3 когда
+    // прошло уже 40 секунд странно. они должны быть real-time»).
+    const rt = (this.state.residual_trail || []).slice(0, maxPins);
+    if (rt.length > 0 && cur.t != null) {
+      ctx.save();
+      const max_age = rt.reduce(
+        (m, r) => Math.max(m, r?.ts_ago ?? 0), 1);
+      // Canvas-bg colour for the inner halo — punches a hole through
+      // the gold trail so small-residual pins stay legible.
+      const bgColor = '#0a0d12';
+      // 2026-05-13 v5 — operator: «он считает разницу между не относи-
+      // тельным значением, к которому оно предиктилось - к прошлому,
+      // а каждый раз пины сравниваются и полный рандомит относительно
+      // текущей температуры сейчас».  v4 fan-from-now-dot tether was
+      // semantically wrong: it suggested pin's offset is relative to
+      // *current* temp, but residual is `actual_at_validation - predicted`
+      // (the past-anchored gap KNN actually missed by).  So tether
+      // now drops vertically from the ring to the local gold-trail
+      // position at xA — the value KNN was trying to predict.  Visual
+      // gap pin↔trail = numeric residual.  Reading: «pin висит на
+      // расстоянии X° от того, к чему оно предиктилось».
+      for (const r of rt) {
+        if (r.ts_ago == null) continue;
+        const t_act = -r.ts_ago;
+        if (t_act < -T_PAST) continue;
+        const abs = Math.abs(r.residual);
+        const c = this._resHex(abs, palette);
+        const xA = toX(t_act);
+        const yPred = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.predicted)));
+        const yAct  = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.actual)));
+        const age_norm = r.ts_ago / Math.max(1, max_age);
+        const fade = 1.0 - 0.5 * age_norm;
+        // Vertical bar: ring → local actual at xA (the past temperature
+        // the prediction was tested against).  This IS the residual
+        // visualised — its length matches the numeric label literally.
+        ctx.strokeStyle = c;
+        ctx.globalAlpha = 0.55 * fade;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.moveTo(xA, yPred); ctx.lineTo(xA, yAct); ctx.stroke();
+        // Small dot on the gold trail at the validation point — anchors
+        // the visual: «вот сюда реальность пришла».
+        ctx.fillStyle = c;
+        ctx.globalAlpha = 0.7 * fade;
+        ctx.beginPath(); ctx.arc(xA, yAct, 1.6, 0, Math.PI * 2); ctx.fill();
+        // Halo around the ring — punches a hole in the trail so the
+        // ring's residual-band colour stays legible for small residuals.
+        ctx.globalAlpha = 0.92 * fade;
+        ctx.fillStyle = bgColor;
+        ctx.beginPath(); ctx.arc(xA, yPred, 6.0, 0, Math.PI * 2); ctx.fill();
+        // Outer ring at (xA, predicted) — KNN's claim location.
+        ctx.globalAlpha = fade;
+        ctx.strokeStyle = c;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath(); ctx.arc(xA, yPred, 6.0, 0, Math.PI * 2); ctx.stroke();
+        // Numeric residual label next to each ring.  Sign convention:
+        //   residual > 0 → actual was hotter than predicted (under-pred);
+        //                  pin sits below trail; label above pin.
+        //   residual < 0 → actual was cooler than predicted (over-pred);
+        //                  pin sits above trail; label below pin.
+        ctx.globalAlpha = 0.92 * fade;
+        ctx.fillStyle = c;
+        ctx.font = 'bold 9.5px var(--font-mono, monospace)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = r.residual >= 0 ? 'bottom' : 'top';
+        const labelDy = r.residual >= 0 ? -8 : 8;
+        const sign = r.residual >= 0 ? '+' : '−';
+        const labelTxt = `${sign}${Math.abs(r.residual).toFixed(1)}°`;
+        ctx.fillText(labelTxt, xA, yPred + labelDy);
+      }
+      ctx.restore();
     }
-    ctx.restore();
   }
 
   _renderResidualTrail() {
@@ -966,6 +1287,8 @@ export class PredictorCockpitTile extends LitElement {
     return html`
       <span class="acc-stack">
         ${this._horizonToggle()}
+        ${this._scopeToggle()}
+        ${this._pinCountToggle()}
         ${spikeChip}
         <span class="acc-chip ${cls15}" title="${tip15}">
           <span class="lbl">±err · 15m</span>
@@ -993,12 +1316,51 @@ export class PredictorCockpitTile extends LitElement {
     `;
   }
 
+  /* Refresh-health strip (2026-05-13): exposes predictor staleness so the
+     operator can see WHY the trail froze on identical values.  Three live
+     counters:
+       • age — seconds since the displayed prediction was computed.  Stays
+         under the daemon's _predict_refresh_sec under healthy load.
+       • skipped — running count of ticks the daemon re-used cache because
+         the previous KNN refresh was still in flight.  Should creep slowly;
+         if it climbs ≥1/sec the KNN backend is bottlenecking.
+       • refresh — wall time of the most recent completed refresh (ms).
+     Tinted amber when age > 5s OR last refresh > 3s — visible "stuck" hint. */
+  _renderRefreshHealth() {
+    const s = this.state || {};
+    const age = s.prediction_age_sec;
+    const skipped = s.predict_refresh_skipped ?? 0;
+    const refreshMs = s.predict_refresh_last_ms ?? 0;
+    const inflight = s.predict_refresh_inflight === true;
+    const trustMode = s.trust_mode || 'prior';
+    const trustN = s.trust_n ?? 0;
+    if (age == null) return html``;
+    const stale = age > 5 || refreshMs > 3000;
+    // P2.9.7 — trust regime of current meta-bucket. Renders glyph + n:
+    //   prior     ○  no data, forecast is base+0 correction with prior σ
+    //   shrunk    ◐  1 ≤ n < PRIOR_K=5, correction damped toward 0
+    //   confident ●  n ≥ 5, full EWMA correction
+    const trustGlyph = {prior: '○', shrunk: '◐', confident: '●'}[trustMode] || '?';
+    return html`
+      <div class="refresh-health ${stale ? 'stale' : ''}">
+        <span>age <strong>${age.toFixed(1)}s</strong></span>
+        <span>skipped <strong>${skipped}</strong></span>
+        <span>refresh <strong>${refreshMs.toFixed(0)}ms</strong></span>
+        <span class="trust trust-${trustMode}" title="meta-bucket trust regime">
+          ${trustGlyph} <strong>${trustMode}</strong> n=${trustN}
+        </span>
+        ${inflight ? html`<span class="inflight">⟳ refreshing</span>` : ''}
+      </div>
+    `;
+  }
+
   _renderLegend() {
     return html`
       <div class="legend">
         <span class="item"><span class="sw gold"></span>actual past 30s</span>
-        <span class="item"><span class="sw cool dashed"></span>forecast +5s</span>
+        <span class="item"><span class="sw cool dashed"></span>knn forecast</span>
         <span class="item"><span class="sw band"></span>σ ±err·2</span>
+        <span class="item"><span class="sw phys"></span>physics (slope)</span>
         <span class="item"><span class="ring ok"></span>past pred ≤ 2°</span>
         <span class="item"><span class="ring warn"></span>2 – 5°</span>
         <span class="item"><span class="ring err"></span>miss &gt; 5°</span>
@@ -1043,8 +1405,54 @@ export class PredictorCockpitTile extends LitElement {
       `;
     });
     return html`
-      <span class="hz-toggle" title="Display horizon — math always runs at +30s (KNN lookahead); UI samples the meta-anchored curve at the selected point">
+      <span class="hz-toggle" title="Display horizon — UI samples the meta-anchored saturation curve at the selected point. Requests beyond the predictor's native horizon (e.g. AlwaysIdleBaseline runs at +5s) are clamped to the at-horizon value rather than extrapolated.">
         <span class="hz-lbl">horizon · ${this._weightLabel()}</span>
+        <span class="hz-seg-group">${items}</span>
+      </span>
+    `;
+  }
+
+  /* Scope toggle: how far back the canvas X-axis reaches.  Past-pred
+     pins are re-binned by the backend to that window, so scope=30 keeps
+     pins close to now (recent) while scope=120 lets the operator look
+     two minutes back without manual rebinning. */
+  _scopeToggle() {
+    const items = PredictorCockpitTile.SCOPES.map((s) => {
+      const active = s === this.activeScope;
+      const label = s >= 60 ? `${s / 60}m` : `${s}s`;
+      return html`
+        <button
+          class="hz-seg ${active ? 'active' : ''}"
+          @click=${() => this._setScope(s)}
+          title="Past window — ${s}s of validations"
+        >${label}</button>
+      `;
+    });
+    return html`
+      <span class="hz-toggle" title="Past window on canvas — controls how far back validation pins distribute.">
+        <span class="hz-lbl">scope</span>
+        <span class="hz-seg-group">${items}</span>
+      </span>
+    `;
+  }
+
+  /* Pin-count toggle: [ 3 | 5 | 10 ] — how many past-prediction rings
+     the canvas overlays.  Operator 2026-05-13 capped at 10 to keep
+     the fan-from-now visualization readable. */
+  _pinCountToggle() {
+    const items = PredictorCockpitTile.PIN_COUNTS.map((n) => {
+      const active = n === this.activePinCount;
+      return html`
+        <button
+          class="hz-seg ${active ? 'active' : ''}"
+          @click=${() => this._setPinCount(n)}
+          title="Past-prediction pins on canvas — ${n}"
+        >${n}</button>
+      `;
+    });
+    return html`
+      <span class="hz-toggle" title="How many past-prediction rings to overlay on the canvas. 3 = recent only, 10 = full window. All tether to the now-dot.">
+        <span class="hz-lbl">pins</span>
         <span class="hz-seg-group">${items}</span>
       </span>
     `;
@@ -1096,6 +1504,8 @@ export class PredictorCockpitTile extends LitElement {
           <span>buckets <strong>${buckets ?? 0}</strong></span>
           <span>log <strong>${logCount ?? 0}</strong></span>
         </div>
+
+        ${this._renderRefreshHealth()}
 
         ${this._renderLegend()}
       `,

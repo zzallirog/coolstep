@@ -744,3 +744,79 @@ def test_route_action_does_not_track_readonly_in_armed(tmp_path, monkeypatch):
         f"hw actuator must be tracked in _armed_actions after successful apply; "
         f"got keys: {list(daemon._armed_actions)}"
     )
+
+
+# --- 5. load_jump → residual bank decay (regression 2026-05-13) ---
+
+
+class _LoadJumpCollector:
+    """Emits a low-load idle frame on sample #1, then jumps to high load on
+    sample #2.  Triggers EventSegmenter load_jump boundary (default thresh
+    25 pp) on the second tick."""
+
+    name = "load_jump_fake"
+
+    def __init__(self) -> None:
+        self.sample_count = 0
+
+    def discover(self) -> bool:
+        return True
+
+    def sample(self) -> dict[str, object]:
+        self.sample_count += 1
+        load = 10.0 if self.sample_count == 1 else 80.0
+        return {
+            "cpu": {"freq_mhz": [3000.0], "load_pct": [load, load],
+                    "temps_c": {"tctl": 70.0}},
+            "gpus": [GpuMetrics(name="g", temp_c=55.0)],
+            "workload": {"label": "code"},
+        }
+
+    def cost(self):  # type: ignore[no-untyped-def]
+        from coolstep.core.schema import Cost
+        return Cost(sample_us=100, rss_kb=0)
+
+
+def test_load_jump_decays_residual_bank(tmp_path, monkeypatch):
+    """Regression (user-observed 2026-05-13): on workload change without a
+    tuned-profile flip, ResidualBank kept applying stale per-bucket EWMA
+    correction (-8 to -17°C systematic over-prediction) — visible as a
+    residual_trail frozen at one value.  Fix wires EventSegmenter's
+    load_jump boundary to bank.decay_all(0.3) so the next ~10 validations
+    re-converge to the new regime's true bias."""
+    from coolstep.core.predictor_meta import MetaPredictor
+
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    daemon = Daemon(
+        period_sec=0.05,
+        ring_capacity=20,
+        store_path=tmp_path / "store.db",
+        ml_state_path=tmp_path / "ml-state.json",
+    )
+    daemon.collectors = [_LoadJumpCollector()]
+    # Only MetaPredictor has a bank — skip if a different predictor is in use.
+    if not isinstance(daemon.predictor, MetaPredictor):
+        pytest.skip("decay wiring is MetaPredictor-specific")
+    # Pre-train bank with a deep idle bucket so we have something to decay.
+    idle_feats = {
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": 0.0,
+        "cpu_temp_accel_per_sec_sq": 0.0,
+        "cpu_temp_max": 65.0,
+    }
+    for _ in range(50):
+        daemon.predictor.bank.observe(idle_feats, -8.0)
+    n_before = sum(s.n for s in daemon.predictor.bank.stats.values())
+    assert n_before >= 50
+
+    asyncio.new_event_loop().run_until_complete(daemon.run(max_ticks=3))
+
+    # After the load_jump on tick 2, decay_all(0.3) was applied → total n
+    # shrank substantially.  Allow small extra n from new observations the
+    # daemon may have made during validate_pending (which back-feeds the
+    # bank on horizon elapse).
+    n_after = sum(s.n for s in daemon.predictor.bank.stats.values())
+    assert n_after < n_before * 0.6, (
+        f"expected bank to decay after load_jump (n_before={n_before}, "
+        f"n_after={n_after}); decay factor should drop total n below 60%"
+    )

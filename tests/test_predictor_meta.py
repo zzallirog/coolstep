@@ -130,5 +130,8 @@ def test_meta_bucket_helper():
         "cpu_temp_slope_per_sec": -0.1,
         "cpu_temp_accel_per_sec_sq": -0.05,
         "cpu_temp_max": 65.0,
+        "cpu_load_max": 45.0,  # mid load band (v2 axis added 2026-05-13)
     })
-    assert bucket == (-1, -1, -1, 1)
+    # v3 (2026-05-13) added a 6th axis for thermal-history phase; no
+    # temp_now/avg_5min here → plateau (1) is the safe default.
+    assert bucket == (-1, -1, -1, 1, 1, 1)

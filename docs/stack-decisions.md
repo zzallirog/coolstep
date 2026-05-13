@@ -317,7 +317,8 @@ fingerprint earns its own ADR (P2.7 spike archive backfill), shrinkage
 constants may want per-fingerprint values rather than one global pair.
 
 **Cross-refs:** `coolstep/core/residual_meta.py:correct()`, tests in
-`tests/test_residual_meta.py::test_shrinkage_*`.
+`tests/test_residual_meta.py::test_shrinkage_*`, the operator screenshot
+from 2026-05-12 captured in `[[project-coolstep-p2_4-adaptive-and-incidents]]`.
 
 ---
 
@@ -352,5 +353,101 @@ faint ghost line, not a louder primary line.
 
 **Cross-refs:** ADR-018 (cockpit tile),
 `coolstep/dashboard/static/components/predictor-cockpit-tile.js:_draw`.
+
+---
+
+## ADR-022: HNSW backend swap-in via runtime selector (preserve chromadb fallback)
+
+**Decision:** the predictor's KNN store becomes pluggable behind
+`COOLSTEP_KNN_BACKEND={chroma,hnsw}` (`coolstep/core/knn.py:make_knn_store`).
+Default stays `chroma` for backward compatibility.  `hnsw` mode constructs
+`coolstep/adapters/storage/hnsw.py:HnswStore` — a chroma-shaped wrapper
+around `chroma-hnswlib` (the vendored fork chromadb already pulls).  Same
+public surface (`discover/available/add/query/query_stable/update_metadata/
+count/count_labeled/dir_size_bytes/list_stable/list_unlabeled`), different
+backing index.
+
+**Why:** chromadb's `PersistentClient.query` under a constrained CPU
+budget (10% slice quota) takes ~9.5s at 42k vectors.  At a 10Hz daemon
+tick that means ~95 ticks reuse a stale prediction during each refresh
+— operator-visible as a frozen residual trail.  hnswlib query stays
+under 1ms in the same conditions.
+
+Synthetic 42k-vector benchmark, unconstrained:
+
+| Backend    | query p50 | query p95 | upsert/s |
+|------------|-----------|-----------|----------|
+| chroma     | 329 ms    | 342 ms    | n/a      |
+| hnsw       | 0.3 ms    | 0.4 ms    | 5026     |
+
+The 1000× factor isn't the chroma library being broken — it's the
+SQLite + HNSW double-bookkeeping cost.  Both backends keep working;
+hnsw gives more headroom under tight slice budgets.
+
+**Dep pin: `chroma-hnswlib>=0.7.6`, NOT upstream `hnswlib`.**  Both
+packages install a `hnswlib` module file with the same name; `pip install
+hnswlib` silently overwrites chromadb's vendored fork, breaking
+`load_index(..., is_persistent_index=True)` in chromadb 0.6.3.  The fork
+is a strict superset of the API HnswStore uses.
+
+**Migration:** `scripts/reindex_hnsw_from_store.py` rebuilds the HNSW
+index from `data/store.db` by re-embedding through the same Embedder
+that produced the chroma vectors — bit-identical output.  Used instead
+of a chromadb→hnsw direct copy because the in-place chromadb HNSW
+file becomes unreadable when upstream `hnswlib>=0.8` writes mix with the
+fork's format.
+
+**Cross-refs:** `coolstep/adapters/storage/hnsw.py`,
+`coolstep/core/knn.py`, `coolstep/core/storage_common.py`,
+`scripts/{reindex_hnsw_from_store,migrate_chroma_to_hnsw,cutover_to_hnsw,hnsw_rollback,watch_hnsw_health}.{py,sh}`.
+
+---
+
+## ADR-023: Three trust regimes surfaced from Bayesian shrinkage state
+
+**Decision:** the implicit prior / shrunk / confident regimes already
+present in `ResidualBank.correct()` (Bayesian shrinkage by `n` vs
+`PRIOR_K=5`) become a named `TrustMode` enum and a `correct_with_trust()`
+helper.  The daemon surfaces the current bucket's mode + sample count
+in `ml-state.json`; the dashboard cockpit renders `○ prior / ◐ shrunk /
+● confident` glyphs next to the refresh-health strip.
+
+  - `prior`     (n == 0)               — no data, zero correction, prior σ
+  - `shrunk`    (1 ≤ n < PRIOR_K)      — damped toward 0, σ wide
+  - `confident` (n ≥ PRIOR_K)          — pure EWMA correction
+
+**Why:** these regimes are load-bearing for prediction trustworthiness
+but were entirely implicit.  Operators reading the cockpit couldn't tell
+a fresh-bucket "+0°C" correction (mode=prior, "we don't know") from a
+fitted-bucket "+0°C" correction (mode=confident, "we've seen this and
+it cancels out") — visually identical, semantically opposite.
+
+**Cross-refs:** `coolstep/core/residual_meta.py:TrustMode`,
+`coolstep/dashboard/static/components/predictor-cockpit-tile.js:_renderRefreshHealth`.
+
+---
+
+## ADR-024: Drift-triggered Embedder refit with parity gate
+
+**Decision:** when `core/cluster_drift.py:detect_cluster_drift` flags
+positive drift on ≥ 3 consecutive 6-hourly checks (each gap ≥ 1h), the
+daemon background-fires `core/embedder_refit.py:refit_and_swap` in a
+worker thread.  Refit re-fits the Embedder on the last 10 000 frames,
+validates ≥ 0.9 top-K parity on a 5% holdout against the live index,
+and only swaps via atomic rename (`data/hnsw.staging/` →
+`data/hnsw/`) when parity passes.  A SIGKILL during the rename window
+leaves `data/hnsw.backup/` for manual recovery; `HnswStore.discover`
+restores it on next start if `data/hnsw/` is missing.
+
+**Why:** the Embedder is fit-once at first start and frozen thereafter.
+Hardware swap, BIOS update, new sustained workload class all shift the
+embedding space → KNN matches become stale → prediction accuracy
+degrades silently.  The drift detector already existed but only logged
+a signal; nothing acted on it.  This wires the action with a
+safety-first gate (parity reject keeps the old index; all-negative
+"improving" drift maps do not count toward the streak).
+
+**Cross-refs:** `coolstep/core/cluster_drift.py:DriftGate`,
+`coolstep/core/embedder_refit.py`, `coolstep/daemon.py:_embedder_refit_check`.
 
 ---

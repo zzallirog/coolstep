@@ -9,6 +9,7 @@ P1.0 KnnPredictor: top-K cosine neighbours over ChromaDB, weighted vote.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -355,6 +356,18 @@ class KnnPredictor:
         coverage = labeled / self.top_k
         confidence = coverage * agreement
         expected_peak = max(peak_temps_after) if peak_temps_after else features.get("cpu_temp_now", features.get("cpu_temp_max"))
+        # Variant 1 (2026-05-13): slope-disagreement blend. When short
+        # slope dissents sharply from the long-window slope, KNN's
+        # historical-peak forecast is describing a workload that just
+        # ended — blend toward a short-slope saturation estimate.
+        knn_reason = (
+            f"{labeled_hot}/{labeled} neighbours hot in 30s "
+            f"(coverage {coverage:.0%}, agreement {agreement:.0%})"
+        )
+        blended_expected, blend_reason = _slope_blended_expected(features, expected_peak)
+        if blended_expected is not None:
+            expected_peak = blended_expected
+            knn_reason = f"{knn_reason} | {blend_reason}"
         knn_pred = Prediction(
             horizon_sec=self.horizon_sec,
             throttle_prob=prob,
@@ -363,14 +376,78 @@ class KnnPredictor:
             model_name=self.name,
             features_used=sorted(features.keys()),
             neighbours=neighbours,
-            reason=(
-                f"{labeled_hot}/{labeled} neighbours hot in 30s "
-                f"(coverage {coverage:.0%}, agreement {agreement:.0%})"
-            ),
+            reason=knn_reason,
             danger_neighbour_count=danger_neighbour_count,
             suggested_rpm=suggested_rpm,
         )
         return _merge_with_trajectory(knn_pred, traj_prob, traj_reason, features)
+
+
+def _slope_blended_expected(
+    features: dict[str, float],
+    raw_expected: float | None,
+) -> tuple[float | None, str | None]:
+    """Blend KNN's expected_temp_c toward a short-slope saturation curve
+    when short and long slopes disagree sharply.
+
+    Catches the workload-flip failure mode: KNN's neighbours describe a
+    workload that just ended (kitty stop, build done). Their historical
+    `peak_temp_after` predicts a peak the chip is no longer heading to,
+    while `short_slope` already shows cooling.
+
+    Math:
+        Δ = |short_slope - long_slope|        [°C/s]
+        Δ < 1.5°C/s   → no blend, return raw
+        Δ ≥ 1.5°C/s   → weight_short = clamp((Δ-1.5)/3.0, 0, 0.8)
+                        physics_est  = T_now + short·τ·(1-exp(-h/τ))
+                                       τ=4s, h=30s
+                        blended      = raw·(1-w) + physics_est·w
+
+    Returns (blended_expected, reason_fragment) — None when blend doesn't
+    apply, so the caller knows whether to append a reason note.
+
+    Operator framing (2026-05-13): "−9°C correction = bucket band-aiding
+    a wrong trajectory, not predicting." Variant 1 fixes the trajectory
+    so meta-correction can stay honest and small.
+    """
+    if raw_expected is None:
+        return None, None
+    short = features.get("cpu_temp_slope_per_sec_short")
+    long = features.get("cpu_temp_slope_per_sec")
+    cur = features.get("cpu_temp_now", features.get("cpu_temp_max"))
+    if short is None or long is None or cur is None:
+        return None, None
+    try:
+        short_f = float(short)
+        long_f = float(long)
+        cur_f = float(cur)
+    except (TypeError, ValueError):
+        return None, None
+    if not (math.isfinite(short_f) and math.isfinite(long_f) and math.isfinite(cur_f)):
+        return None, None
+    delta = abs(short_f - long_f)
+    THRESHOLD = 1.5  # °C/s — below this the slopes "agree", no blend
+    RAMP = 3.0       # °C/s — Δ = THRESHOLD + RAMP saturates weight at 0.8
+    MAX_WEIGHT = 0.8
+    if delta < THRESHOLD:
+        return None, None
+    weight_short = min(MAX_WEIGHT, max(0.0, (delta - THRESHOLD) / RAMP))
+    # Clamp short to the same envelope TrajectoryBaseline uses, so sensor
+    # flap can't drive a physics-implausible blend target.
+    short_clamped = max(-3.0, min(3.0, short_f))
+    tau = 4.0
+    horizon = 30.0
+    factor = 1.0 - math.exp(-horizon / tau)
+    physics_est = cur_f + short_clamped * tau * factor
+    # Silicon-plausible clamp on the physics estimate itself — chip won't
+    # plunge below ambient or rocket past TjMax in 30 s.
+    physics_est = max(20.0, min(120.0, physics_est))
+    blended = raw_expected * (1.0 - weight_short) + physics_est * weight_short
+    reason = (
+        f"slope-blend w={weight_short:.2f} "
+        f"(short {short_f:+.2f} vs long {long_f:+.2f}°C/s) → {blended:.1f}°C"
+    )
+    return blended, reason
 
 
 def _merge_with_trajectory(

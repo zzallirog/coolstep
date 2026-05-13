@@ -38,6 +38,68 @@ from coolstep.adapters.collectors import discover as discover_collectors
 _ADAPTERS_CACHE_SEC = 25.0
 _adapters_cache: dict[str, object] = {"ts": 0.0, "body": None}
 
+# /api/calibration runs 5 full-scan sqlite queries on frames table
+# (118k+ rows): COUNT, MAX(cpu_temp), 2× filtered COUNT, COUNT DISTINCT.
+# Each scan is ~100-200ms unconstrained, ~300-700ms under dashboard's
+# CPU quota — call total ~1s wall. The gates state changes on the
+# order of minutes (frame count / throttle events / workload labels
+# evolve slowly), so a 30s cache shaves the per-poll cost without
+# masking real state shifts.  Operator-flagged 2026-05-13: dashboard
+# was hanging unevenly on cockpit polls — root cause was sibling tiles
+# (calibration, discoveries) sharing the FastAPI event loop and
+# blocking it for ~1s every poll cycle.
+_CALIBRATION_CACHE_SEC = 30.0
+_calibration_cache: dict[str, object] = {"ts": 0.0, "body": None}
+
+# /api/discoveries rebuilds the signal manifest by re-instantiating every
+# collector via discover_collectors() — ~300 ms unconstrained.  Signals
+# don't change without a daemon restart, so a one-minute cache is more
+# than safe.
+_DISCOVERIES_CACHE_SEC = 60.0
+_discoveries_cache: dict[str, object] = {"ts": 0.0, "body": None}
+
+# Per-endpoint cache buckets. The 2-min browser-open simulation
+# (operator-instrumented 2026-05-13) showed cockpit p99 = 7.7s under
+# realistic 15-tile concurrent polling — root cause was sibling tiles
+# (mode/profile/reliability/efficiency/drift/incidents/actuator-journal/
+# predictor-breakdown/neighbours) running synchronous file IO or
+# subprocesses on the FastAPI event loop. Each blocks the worker for
+# ~100-1000 ms, queueing cockpit polls behind them. Caches + to_thread
+# offload makes the worker non-blocking, which is the whole fix.
+_GENERIC_CACHES: dict[str, dict[str, object]] = {}
+
+
+def _cached_endpoint(key: str, ttl_sec: float):
+    """Tiny helper to mirror the inline (_calibration_cache /
+    _discoveries_cache / _adapters_cache) pattern without 9 copies of
+    boilerplate. Returns (cached_body, put_callback) — None means miss.
+    """
+    now = time.monotonic()
+    entry = _GENERIC_CACHES.get(key)
+    if entry is not None and (now - float(entry["ts"])) < ttl_sec:
+        return entry["body"], None
+
+    def _put(body):  # noqa: ANN001
+        _GENERIC_CACHES[key] = {"ts": time.monotonic(), "body": body}
+        return body
+
+    return None, _put
+
+
+def _reset_endpoint_caches() -> None:
+    """Test helper: drop every cached endpoint body so a fresh request
+    re-runs the handler. Tests mutate the underlying files between
+    calls and would otherwise see stale cached responses. Pytest
+    conftest installs this as an autouse fixture in tests/dashboard/.
+    """
+    _GENERIC_CACHES.clear()
+    _adapters_cache["ts"] = 0.0
+    _adapters_cache["body"] = None
+    _calibration_cache["ts"] = 0.0
+    _calibration_cache["body"] = None
+    _discoveries_cache["ts"] = 0.0
+    _discoveries_cache["body"] = None
+
 
 def _coolstep_home() -> Path:
     return Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
@@ -185,13 +247,24 @@ def create_app() -> FastAPI:
 
     @app.get("/api/calibration")
     async def calibration() -> JSONResponse:
+        now = time.monotonic()
+        cached = _calibration_cache.get("body")
+        if cached is not None and (now - float(_calibration_cache["ts"])) < _CALIBRATION_CACHE_SEC:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         from coolstep.core.calibration import evaluate
 
-        report = evaluate(store_path=_store_path())
+        # The 5 full-scan sqlite queries inside evaluate() are CPU-bound under
+        # the dashboard's CPUQuota — running them on the FastAPI event loop
+        # blocks every other endpoint for ~1s (cockpit polls queue up,
+        # operator sees uneven hangs).  Offload to a worker thread so other
+        # tiles keep responding while calibration recomputes.
+        report = await asyncio.to_thread(evaluate, _store_path())
         body = report.to_dict()
         # frontend ожидает gates как dict — переформатируем под существующий dashboard.js
         gates_dict = {g["name"]: g for g in body["gates"]}  # type: ignore[index]
         body["gates"] = gates_dict
+        _calibration_cache["ts"] = now
+        _calibration_cache["body"] = body
         return JSONResponse(body)
 
     @app.get("/api/adapters")
@@ -236,107 +309,137 @@ def create_app() -> FastAPI:
     async def efficiency(since: str = "7d") -> JSONResponse:
         from dataclasses import asdict
 
+        cached, put = _cached_endpoint(f"efficiency:{since}", 30.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
         from coolstep.core.efficiency import compute_historical
-        report = compute_historical(_store_path(), since_seconds=_parse_window(since))
-        return JSONResponse({
-            "bins": [asdict(b) for b in report.bins],
-            "sweet_spot_temp": report.sweet_spot_temp,
-            "sweet_spot_efficiency": report.sweet_spot_efficiency,
-            "knee_temp": report.knee_temp,
-            "sample_count": report.sample_count,
-            "t_ambient": report.t_ambient,
-            "t_max": report.t_max,
-        })
+
+        def _work() -> dict:
+            report = compute_historical(_store_path(), since_seconds=_parse_window(since))
+            return {
+                "bins": [asdict(b) for b in report.bins],
+                "sweet_spot_temp": report.sweet_spot_temp,
+                "sweet_spot_efficiency": report.sweet_spot_efficiency,
+                "knee_temp": report.knee_temp,
+                "sample_count": report.sample_count,
+                "t_ambient": report.t_ambient,
+                "t_max": report.t_max,
+            }
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/drift")
     async def drift() -> JSONResponse:
+        cached, put = _cached_endpoint("drift", 30.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         from coolstep.core.drift import evaluate
         history_path = _coolstep_home() / "drift-history.jsonl"
-        report = evaluate(_ml_state_path(), history_path)
-        return JSONResponse(report.to_dict())
+
+        def _work() -> dict:
+            return evaluate(_ml_state_path(), history_path).to_dict()
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/neighbours")
     async def neighbours() -> JSONResponse:
         """Latest predictor's top-K neighbours snapshot via ml-state.json."""
+        cached, put = _cached_endpoint("neighbours", 1.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         path = _ml_state_path()
         if not path.exists():
             return JSONResponse({"neighbours": [], "model": None, "reason": "ml-state absent"})
-        try:
-            state = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            return JSONResponse({"neighbours": [], "error": str(exc)}, status_code=500)
-        return JSONResponse({
-            "neighbours": state.get("neighbours") or [],
-            "model": state.get("model_name"),
-            "reason": state.get("reason", ""),
-            "throttle_prob": state.get("throttle_prob", 0.0),
-            "confidence": state.get("confidence", 0.0),
-            "chroma_count": state.get("chroma_count", 0),
-            "embedder_fitted": state.get("embedder_fitted", False),
-        })
+
+        def _work() -> dict:
+            try:
+                state = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"neighbours": [], "error": str(exc), "_status": 500}
+            return {
+                "neighbours": state.get("neighbours") or [],
+                "model": state.get("model_name"),
+                "reason": state.get("reason", ""),
+                "throttle_prob": state.get("throttle_prob", 0.0),
+                "confidence": state.get("confidence", 0.0),
+                "chroma_count": state.get("chroma_count", 0),
+                "embedder_fitted": state.get("embedder_fitted", False),
+            }
+
+        body = await asyncio.to_thread(_work)
+        if body.get("_status") == 500:
+            body.pop("_status", None)
+            return JSONResponse(body, status_code=500)
+        return JSONResponse(put(body))
 
     @app.get("/api/predictor-breakdown")
     async def predictor_breakdown() -> JSONResponse:
         """Surface enough of ml-state.json for the predictor-breakdown tile.
 
         Splits the final throttle_prob into its two contributing signals so
-        the operator can see WHICH path drove a decision:
-          - KNN: neighbour-vote over ChromaDB
-          - Trajectory: physics-first overlay (high cur_temp + steep slope)
-
-        Trajectory is re-computed server-side from features (we don't depend
-        on parsing the reason string). NOTE: thresholds below MUST mirror
-        ``coolstep/core/predictor.py:KnnPredictor._trajectory_signal``. If
-        those private constants change, update both sites in lockstep.
+        the operator can see WHICH path drove a decision. Trajectory is
+        re-computed server-side from features (mirrors
+        ``predictor.py:KnnPredictor._trajectory_signal`` thresholds).
         """
+        cached, put = _cached_endpoint("predictor_breakdown", 1.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         path = _ml_state_path()
         if not path.exists():
             return JSONResponse({"error": "no ml-state"}, status_code=404)
-        try:
-            m = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
 
-        features = m.get("features", {}) or {}
-        cpu_temp_max = float(features.get("cpu_temp_max") or 0.0)
-        cpu_temp_now = float(
-            features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0
-        )
-        slope = float(features.get("cpu_temp_slope_per_sec") or 0.0)
-        cpu_load_max = float(features.get("cpu_load_max") or 0.0)
+        def _work() -> dict:
+            try:
+                m = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"error": str(exc), "_status": 500}
 
-        # Mirror predictor.py:_trajectory_signal — keep in sync manually.
-        # Gates on the live sample ("HOT NOW" means now, not "was hot at
-        # some point inside the rolling window").
-        HOT_NOW_C = 78.0
-        FAST_SLOPE = 1.0
-        MED_SLOPE = 0.5
-        PAST_KNEE_C = 85.0
-        trajectory_prob = 0.0
-        if cpu_temp_now >= HOT_NOW_C and slope >= FAST_SLOPE:
-            trajectory_prob = 0.9
-        elif cpu_temp_now >= HOT_NOW_C and slope >= MED_SLOPE:
-            trajectory_prob = 0.7
-        elif cpu_temp_now >= PAST_KNEE_C:
-            trajectory_prob = 0.65
+            features = m.get("features", {}) or {}
+            cpu_temp_max = float(features.get("cpu_temp_max") or 0.0)
+            cpu_temp_now = float(
+                features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0
+            )
+            slope = float(features.get("cpu_temp_slope_per_sec") or 0.0)
+            cpu_load_max = float(features.get("cpu_load_max") or 0.0)
 
-        return JSONResponse({
-            "model_name": m.get("model_name"),
-            "throttle_prob": m.get("throttle_prob"),
-            "confidence": m.get("confidence"),
-            "expected_temp_c": m.get("expected_temp_c"),
-            "reason": m.get("reason", ""),
-            "features": {
-                "cpu_temp_now": cpu_temp_now,
-                "cpu_temp_max": cpu_temp_max,
-                "cpu_temp_slope_per_sec": slope,
-                "cpu_load_max": cpu_load_max,
-            },
-            "trajectory_prob_estimate": trajectory_prob,
-        })
+            HOT_NOW_C = 78.0
+            FAST_SLOPE = 1.0
+            MED_SLOPE = 0.5
+            PAST_KNEE_C = 85.0
+            trajectory_prob = 0.0
+            if cpu_temp_now >= HOT_NOW_C and slope >= FAST_SLOPE:
+                trajectory_prob = 0.9
+            elif cpu_temp_now >= HOT_NOW_C and slope >= MED_SLOPE:
+                trajectory_prob = 0.7
+            elif cpu_temp_now >= PAST_KNEE_C:
+                trajectory_prob = 0.65
+
+            return {
+                "model_name": m.get("model_name"),
+                "throttle_prob": m.get("throttle_prob"),
+                "confidence": m.get("confidence"),
+                "expected_temp_c": m.get("expected_temp_c"),
+                "reason": m.get("reason", ""),
+                "features": {
+                    "cpu_temp_now": cpu_temp_now,
+                    "cpu_temp_max": cpu_temp_max,
+                    "cpu_temp_slope_per_sec": slope,
+                    "cpu_load_max": cpu_load_max,
+                },
+                "trajectory_prob_estimate": trajectory_prob,
+            }
+
+        body = await asyncio.to_thread(_work)
+        if body.get("_status") == 500:
+            body.pop("_status", None)
+            return JSONResponse(body, status_code=500)
+        return JSONResponse(put(body))
 
     @app.get("/api/predictor-cockpit")
-    async def predictor_cockpit() -> JSONResponse:
+    async def predictor_cockpit(scope_s: int = 30) -> JSONResponse:
         """Aggregated state for `<predictor-cockpit-tile>` — single round-trip
         instead of 3-4 polls.  Combines:
           - last 30s of (ts, actual_temp) from sqlite frames
@@ -361,12 +464,16 @@ def create_app() -> FastAPI:
         features = m.get("features", {}) or {}
         now = _time.time()
 
-        # Past 30s temperature trail from sqlite frames table.
-        # _open_db is a module-level helper used by every other route; same here.
+        # Past 60s temperature trail from sqlite frames table. The
+        # visible canvas window is ~38s (T_PAST = max(30, horizon+8));
+        # the extra 20s+ buffer keeps the polyline anchored at the left
+        # edge while the frontend's rAF pump slides X-positions left
+        # between 2 s polls (P2.9.8, operator: «график едет», 2026-05-13).
+        # Cost: ~300 floats (60s × 5Hz) per response, negligible.
         actual_trail: list[dict[str, float]] = []
         try:
             db = _open_db()
-            since = now - 30.0
+            since = now - 60.0
             rows = db.execute(
                 "SELECT ts, cpu_temp FROM frames "
                 "WHERE ts >= ? AND cpu_temp IS NOT NULL "
@@ -380,20 +487,61 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001
             actual_trail = []
 
-        # Residual trail — last 12 validated predictions.
+        # Residual trail — validated predictions across the canvas window
+        # (2026-05-13: prior `tail(12)` packed 12 records from a 2.4s slice
+        # since daemon validates @5Hz; every ring stacked at the −30s
+        # canvas edge.  Now: walk a wider tail and bin by validation time
+        # (`ts_ago`) — picks one freshest record per ~2.5s bucket over the
+        # canvas T_PAST window so 12 rings span the full timeline). */
         residual_trail: list[dict[str, float | str | None]] = []
         try:
             log = _residual_log()
             if log is not None:
-                tail = log.tail(12)
-                for r in tail:
+                # scope_s clamped to [10, 600] — operator-selected past
+                # window for residual-trail distribution.  Default 30s
+                # matches canvas T_PAST.  Larger scope walks further
+                # back in the log so bin width grows accordingly.
+                scope_clamped = max(10, min(600, int(scope_s)))
+                wide_tail = log.tail(max(600, scope_clamped * 5))
+                canvas_window = float(scope_clamped)
+                n_bins = 12
+                bin_width = max(0.5, canvas_window / max(1, n_bins))
+                # Stable bucket key (2026-05-13 — operator: «цифры что
+                # предиктилось плавают»).  Prior bucket = current-age /
+                # bin_width changed each tick: a record at ts_ago=8s
+                # belonged to bin 0; one tick later (ts_ago=10s) it
+                # moved to bin 1, and bin 0's content rotated to a
+                # fresher record — pin Y jumped because record changed.
+                # New key: bucket index derived from absolute predicted_at
+                # (rounded to bin_width).  Each record stays in the
+                # same bucket forever; pins only update when a new
+                # validation enters a fresh bucket or an old one ages
+                # past the scope window.
+                picked: dict[int, object] = {}
+                for r in wide_tail:
+                    age_validation = now - r.ts
+                    if age_validation < 0 or age_validation > canvas_window:
+                        continue
+                    bucket_key = int(r.predicted_at // bin_width)
+                    existing = picked.get(bucket_key)
+                    # Keep youngest validation per stable bucket.
+                    if (
+                        existing is None
+                        or getattr(existing, "ts", 0) < r.ts  # type: ignore[arg-type]
+                    ):
+                        picked[bucket_key] = r
+                # Newest predicted_at bucket first.
+                ordered = [picked[k] for k in sorted(picked.keys(), reverse=True)]
+                if not ordered:
+                    ordered = list(reversed(wide_tail[-12:]))
+                for r in ordered[:n_bins]:
                     residual_trail.append({
-                        "ts_ago": round(now - r.ts, 1),
-                        "predicted_at_ago": round(now - r.predicted_at, 1),
-                        "predicted": r.predicted_temp_c,
-                        "actual": r.actual_temp_c,
-                        "residual": round(r.residual_c, 2),
-                        "bucket_key": list(r.bucket_key) if r.bucket_key else None,
+                        "ts_ago": round(now - r.ts, 1),  # type: ignore[union-attr]
+                        "predicted_at_ago": round(now - r.predicted_at, 1),  # type: ignore[union-attr]
+                        "predicted": r.predicted_temp_c,  # type: ignore[union-attr]
+                        "actual": r.actual_temp_c,  # type: ignore[union-attr]
+                        "residual": round(r.residual_c, 2),  # type: ignore[union-attr]
+                        "bucket_key": list(r.bucket_key) if r.bucket_key else None,  # type: ignore[union-attr]
                     })
         except Exception:  # noqa: BLE001
             residual_trail = []
@@ -436,22 +584,32 @@ def create_app() -> FastAPI:
 
         # Multi-horizon samples of the same meta-anchored forecast curve
         # (P2.9.3).  Curve formula (ADR-021): T(t) = T0 + (Tpred − T0)·F(t)/F(h),
-        # F(t) = 1 − exp(−t/τ), τ=4s.  At t=h → Tpred exactly.  Three samples
-        # share math + cost; UI picks which horizon to display via toggle.
+        # F(t) = 1 − exp(−t/τ), τ=4s.  At t=h → Tpred exactly.
+        #
+        # Beyond-horizon clamp (regression fix 2026-05-13): when the model's
+        # horizon_sec is shorter than a requested sample (e.g. always_idle
+        # baseline runs at 5s, UI also offers 15s/30s tabs), extrapolating
+        # F(t)/F(h) past h overshoots — at horizon=5s with cur=74, pred=56.5,
+        # _sample(15) ≈ 50 < pred=56.5, breaking monotonicity. Cap requested
+        # h at horizon_sec so any beyond-horizon tab honestly reports the
+        # at-horizon prediction instead of inventing a number the model
+        # didn't make.
         forecasts: dict[str, float] | None = None
         if predicted is not None and cur_t > 0:
             import math as _m
             tau = 4.0
-            f_h = 1.0 - _m.exp(-float(horizon) / tau)
+            horizon_f = float(horizon)
+            f_h = 1.0 - _m.exp(-horizon_f / tau)
             if f_h > 1e-6:
                 full_delta = float(predicted) - cur_t
                 def _sample(h: float) -> float:
-                    f = 1.0 - _m.exp(-h / tau)
+                    h_capped = min(h, horizon_f)
+                    f = 1.0 - _m.exp(-h_capped / tau)
                     return round(cur_t + full_delta * (f / f_h), 2)
                 forecasts = {
                     "h5":  _sample(5.0),
                     "h15": _sample(15.0),
-                    "h30": round(float(predicted), 2),
+                    "h30": _sample(30.0),
                 }
 
         current = {
@@ -483,6 +641,16 @@ def create_app() -> FastAPI:
             "meta_buckets": m.get("meta_buckets", 0),
             "residual_log_count": m.get("residual_log_count", 0),
             "spike": m.get("spike") or {"active": False},
+            # Predictor refresh health surfacing (cockpit tile renders these
+            # under the bucket-strip as "age N.Ns · skipped K · refresh Tms").
+            "prediction_age_sec": m.get("prediction_age_sec"),
+            "predict_refresh_skipped": m.get("predict_refresh_skipped", 0),
+            "predict_refresh_last_ms": m.get("predict_refresh_last_ms", 0.0),
+            "predict_refresh_inflight": m.get("predict_refresh_inflight", False),
+            # P2.9.7 — meta-bucket trust regime (prior / shrunk / confident).
+            "trust_mode": m.get("trust_mode", "prior"),
+            "trust_n": m.get("trust_n", 0),
+            "scope_s": max(10, min(600, int(scope_s))),
         })
 
     @app.get("/api/throttle-events")
@@ -510,18 +678,31 @@ def create_app() -> FastAPI:
     @app.get("/api/discoveries")
     async def discoveries() -> JSONResponse:
         """Zabbix-LLD-style signal manifest aggregated over all collectors."""
+        now = time.monotonic()
+        cached = _discoveries_cache.get("body")
+        if cached is not None and (now - float(_discoveries_cache["ts"])) < _DISCOVERIES_CACHE_SEC:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         from dataclasses import asdict
 
-        collectors = discover_collectors()
-        manifest: list[dict[str, object]] = []
-        for c in collectors:
-            if not hasattr(c, "signals"):
-                continue
-            for sig in c.signals():
-                row = asdict(sig)
-                row["collector"] = c.name
-                manifest.append(row)
-        return JSONResponse({"signals": manifest, "total": len(manifest)})
+        def _build_manifest() -> dict[str, object]:
+            collectors = discover_collectors()
+            manifest: list[dict[str, object]] = []
+            for c in collectors:
+                if not hasattr(c, "signals"):
+                    continue
+                for sig in c.signals():
+                    row = asdict(sig)
+                    row["collector"] = c.name
+                    manifest.append(row)
+            return {"signals": manifest, "total": len(manifest)}
+
+        # discover_collectors() probes /sys, /proc, runs subprocesses — never
+        # block the event loop on it.  Same reasoning as the calibration
+        # offload above; uvicorn's default executor handles the thread.
+        body = await asyncio.to_thread(_build_manifest)
+        _discoveries_cache["ts"] = now
+        _discoveries_cache["body"] = body
+        return JSONResponse(body)
 
     @app.get("/api/stack-rationale")
     async def stack_rationale() -> JSONResponse:
@@ -532,23 +713,30 @@ def create_app() -> FastAPI:
 
     @app.get("/api/actuator-journal")
     async def actuator_journal(limit: int = 50) -> JSONResponse:
-        """Tail of `data/actuator-journal.jsonl` — append-only feed written
-        by every actuator's apply()/revert(). The dashboard process can't
-        see the daemon's in-memory journal (separate Python process), so we
-        contract on a file. One JSON record per line; this endpoint returns
-        the last `limit` records sorted by ts descending.
-        """
+        """Tail of `data/actuator-journal.jsonl`. Streams the file with a
+        bounded deque so the worker doesn't read 575 KB into memory on every
+        poll (same `deque(maxlen=n)` shape as `ResidualLog.tail`)."""
         if limit <= 0:
             limit = 50
+        cached, put = _cached_endpoint(f"actuator_journal:{limit}", 5.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         path = _coolstep_home() / "actuator-journal.jsonl"
-        entries: list[dict[str, object]] = []
-        if path.exists():
+
+        def _work() -> dict:
+            from collections import deque
+
+            entries: list[dict[str, object]] = []
+            if not path.exists():
+                return {"entries": [], "total": 0}
+            # 4× headroom for malformed lines we'll skip.
+            keep = max(limit * 4, 200)
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                with open(path, encoding="utf-8") as f:
+                    tail_lines = deque(f, maxlen=keep)
             except OSError:
-                lines = []
-            # Read from the tail backwards to avoid loading huge histories.
-            for line in lines[-(limit * 4):]:  # 4× headroom for malformed lines
+                return {"entries": [], "total": 0}
+            for line in tail_lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -556,11 +744,14 @@ def create_app() -> FastAPI:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        entries.sort(
-            key=lambda e: (e.get("ts") or e.get("applied_at") or 0.0),
-            reverse=True,
-        )
-        return JSONResponse({"entries": entries[:limit], "total": len(entries)})
+            entries.sort(
+                key=lambda e: (e.get("ts") or e.get("applied_at") or 0.0),
+                reverse=True,
+            )
+            return {"entries": entries[:limit], "total": len(entries)}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/crash-recovery")
     async def crash_recovery() -> JSONResponse:
@@ -599,68 +790,69 @@ def create_app() -> FastAPI:
         Every branch tolerates missing/malformed inputs: keys stay ``None``
         rather than raising, so the tile always gets a parseable JSON body.
         """
+        cached, put = _cached_endpoint("reliability", 30.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
         import subprocess
 
-        body: dict[str, object] = {
-            "uptime_sec": None,
-            "restart_count": None,
-            "last_crash": None,
-            "mtbf_sec": None,
-        }
-
-        # systemctl info — short timeout, ok to fail silently (CI/non-systemd)
-        try:
-            cp = subprocess.run(
-                ["systemctl", "--user", "show", "coolstep-collector.service",
-                 "--property=ActiveEnterTimestampMonotonic,NRestarts"],
-                capture_output=True, timeout=2, check=False,
-            )
-            if cp.returncode == 0:
-                for line in cp.stdout.decode().splitlines():
-                    if "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    if k == "ActiveEnterTimestampMonotonic" and v.isdigit():
-                        try:
-                            with open("/proc/uptime") as f:
-                                now_mono_sec = float(f.read().split()[0])
-                            start_mono_sec = int(v) / 1_000_000.0
-                            if int(v) > 0:
-                                body["uptime_sec"] = max(0.0, now_mono_sec - start_mono_sec)
-                        except (OSError, ValueError):
-                            pass
-                    elif k == "NRestarts" and v.isdigit():
-                        body["restart_count"] = int(v)
-        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-            pass
-
-        # Last crash recovery — reuse the file behind /api/crash-recovery.
-        crash_p = _coolstep_home() / "last-crash-recovery.json"
-        if crash_p.exists():
+        def _work() -> dict:
+            body: dict[str, object] = {
+                "uptime_sec": None,
+                "restart_count": None,
+                "last_crash": None,
+                "mtbf_sec": None,
+            }
             try:
-                crash_data = json.loads(crash_p.read_text())
-                ts = crash_data.get("ts")
-                body["last_crash"] = {
-                    "ts": ts,
-                    "kind": crash_data.get("kind"),
-                    "age_sec": time.time() - float(ts) if ts is not None else None,
-                }
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                cp = subprocess.run(
+                    ["systemctl", "--user", "show", "coolstep-collector.service",
+                     "--property=ActiveEnterTimestampMonotonic,NRestarts"],
+                    capture_output=True, timeout=2, check=False,
+                )
+                if cp.returncode == 0:
+                    for line in cp.stdout.decode().splitlines():
+                        if "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        if k == "ActiveEnterTimestampMonotonic" and v.isdigit():
+                            try:
+                                with open("/proc/uptime") as f:
+                                    now_mono_sec = float(f.read().split()[0])
+                                start_mono_sec = int(v) / 1_000_000.0
+                                if int(v) > 0:
+                                    body["uptime_sec"] = max(0.0, now_mono_sec - start_mono_sec)
+                            except (OSError, ValueError):
+                                pass
+                        elif k == "NRestarts" and v.isdigit():
+                            body["restart_count"] = int(v)
+            except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
                 pass
 
-        # MTBF — rough estimate. Without a recovery series we can only say:
-        #   - no crashes yet → MTBF = uptime (best case lower bound)
-        #   - one crash       → MTBF ≈ time since that crash
-        if body["last_crash"] is None and body["uptime_sec"] is not None:
-            body["mtbf_sec"] = body["uptime_sec"]
-        elif (
-            body["last_crash"] is not None
-            and isinstance(body["last_crash"], dict)
-            and body["last_crash"].get("age_sec") is not None
-        ):
-            body["mtbf_sec"] = body["last_crash"]["age_sec"]
+            crash_p = _coolstep_home() / "last-crash-recovery.json"
+            if crash_p.exists():
+                try:
+                    crash_data = json.loads(crash_p.read_text())
+                    ts = crash_data.get("ts")
+                    body["last_crash"] = {
+                        "ts": ts,
+                        "kind": crash_data.get("kind"),
+                        "age_sec": time.time() - float(ts) if ts is not None else None,
+                    }
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    pass
 
-        return JSONResponse(body)
+            if body["last_crash"] is None and body["uptime_sec"] is not None:
+                body["mtbf_sec"] = body["uptime_sec"]
+            elif (
+                body["last_crash"] is not None
+                and isinstance(body["last_crash"], dict)
+                and body["last_crash"].get("age_sec") is not None
+            ):
+                body["mtbf_sec"] = body["last_crash"]["age_sec"]
+            return body
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/stress-state")
     async def stress_state() -> JSONResponse:
@@ -722,39 +914,40 @@ def create_app() -> FastAPI:
 
     @app.get("/api/mode")
     async def get_mode() -> JSONResponse:
-        """Return the current operational mode + safety context.
-
-        `mode` ∈ {cool, quiet, off}. `cpu_temp_c` and `throttle_prob`
-        carry the live signals the dashboard needs to render whether
-        a quiet bias *would* be eligible right now — the actual gating
-        lives in the daemon, but exposing the inputs lets the UI surface
-        «safety-eject» state without a second probe.
-        """
+        """Return the current operational mode + safety context."""
+        cached, put = _cached_endpoint("mode", 5.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         path = _runtime_state_path()
         ml = _ml_state_path()
-        body: dict[str, object] = {
-            "mode": "cool",
-            "valid_modes": sorted(VALID_MODES),
-            "cpu_temp_c": None,
-            "throttle_prob": None,
-        }
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                stored = str(data.get("mode") or "cool").lower()
-                if stored in VALID_MODES:
-                    body["mode"] = stored
-            except (OSError, json.JSONDecodeError):
-                pass
-        if ml.exists():
-            try:
-                ml_data = json.loads(ml.read_text())
-                feats = ml_data.get("features", {}) or {}
-                body["cpu_temp_c"] = feats.get("cpu_temp_now", feats.get("cpu_temp_max"))
-                body["throttle_prob"] = ml_data.get("throttle_prob")
-            except (OSError, json.JSONDecodeError):
-                pass
-        return JSONResponse(body)
+
+        def _work() -> dict:
+            body: dict[str, object] = {
+                "mode": "cool",
+                "valid_modes": sorted(VALID_MODES),
+                "cpu_temp_c": None,
+                "throttle_prob": None,
+            }
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                    stored = str(data.get("mode") or "cool").lower()
+                    if stored in VALID_MODES:
+                        body["mode"] = stored
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if ml.exists():
+                try:
+                    ml_data = json.loads(ml.read_text())
+                    feats = ml_data.get("features", {}) or {}
+                    body["cpu_temp_c"] = feats.get("cpu_temp_now", feats.get("cpu_temp_max"))
+                    body["throttle_prob"] = ml_data.get("throttle_prob")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return body
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     def _persist_mode(target: str) -> JSONResponse:
         """Shared body for the per-action mode endpoints. Each action has its
@@ -802,25 +995,26 @@ def create_app() -> FastAPI:
 
     @app.get("/api/profile")
     async def get_profile() -> JSONResponse:
-        """Active workload profile (CODE/RENDER/GAME/IDLE/OTHER).
-
-        Derived from ml-state.json — the daemon writes the focused-
-        window class there, and we resolve it the same way the daemon
-        does (the resolver is pure)."""
-        from coolstep.core.workload_profile import resolve_profile, Profile
+        """Active workload profile (CODE/RENDER/GAME/IDLE/OTHER)."""
+        cached, put = _cached_endpoint("profile", 30.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+        from coolstep.core.workload_profile import Profile, resolve_profile
         ml = _ml_state_path()
-        cls: str | None = None
-        if ml.exists():
-            try:
-                data = json.loads(ml.read_text())
-                # workload_class is forwarded by the curve_ctx payload-build
-                # path; in ml-state.json the daemon puts it under
-                # `workload_label`.
-                cls = data.get("workload_label") or data.get("workload_class")
-            except (OSError, json.JSONDecodeError):
-                pass
-        profile = resolve_profile(cls).value if cls else Profile.OTHER.value
-        return JSONResponse({"profile": profile, "workload_class": cls})
+
+        def _work() -> dict:
+            cls: str | None = None
+            if ml.exists():
+                try:
+                    data = json.loads(ml.read_text())
+                    cls = data.get("workload_label") or data.get("workload_class")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            profile = resolve_profile(cls).value if cls else Profile.OTHER.value
+            return {"profile": profile, "workload_class": cls}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/event-segments")
     async def get_event_segments(since: str = "24h", limit: int = 50) -> JSONResponse:
@@ -862,11 +1056,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/incidents")
     async def get_incidents(since: str = "7d", limit: int = 50) -> JSONResponse:
-        """List recent incidents (newest-first) within the trailing
-        window. Each row already carries its multi-angle `similar`
-        verdict — the dashboard tile renders it directly."""
+        """List recent incidents (newest-first) within the trailing window."""
+        cached, put = _cached_endpoint(f"incidents:{since}:{limit}", 15.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
         from coolstep.core.incidents import read_incidents
-        # Parse `since` — match the throttle-events parser style.
         seconds_per_unit = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
         floor: float | None = None
         try:
@@ -875,12 +1069,13 @@ def create_app() -> FastAPI:
                 floor = time.time() - n * seconds_per_unit[since[-1]]
         except (ValueError, IndexError):
             floor = None
-        rows = read_incidents(since_sec=floor, limit=limit)
-        return JSONResponse({
-            "count": len(rows),
-            "since_sec": floor,
-            "incidents": rows,
-        })
+
+        def _work() -> dict:
+            rows = read_incidents(since_sec=floor, limit=limit)
+            return {"count": len(rows), "since_sec": floor, "incidents": rows}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/incidents/{ts:float}/similar")
     async def get_incident_similar(ts: float) -> JSONResponse:

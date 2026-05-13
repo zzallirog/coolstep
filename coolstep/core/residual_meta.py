@@ -41,8 +41,10 @@ Public surface:
     quantise_slope_sign(slope) -> int                         # {-1, 0, +1}
     quantise_accel_sign(accel) -> int                         # {-1, 0, +1}
     quantise_profile_band(temp) -> int                        # {0, 1, 2}  cold/warm/hot
-    bucket_of(features) -> tuple[int, int, int, int]
-    BucketKey = tuple[int, int, int, int]
+    quantise_load_pct_band(load_max) -> int                   # {0, 1, 2}  idle/mid/high  (v2 2026-05-13)
+    quantise_temp_phase(temp_now, temp_avg_5min) -> int       # {0, 1, 2}  asc/plateau/desc (v3 2026-05-13)
+    bucket_of(features) -> tuple[int, int, int, int, int, int]
+    BucketKey = tuple[int, int, int, int, int, int]
     RunningStat                          # Welford incremental stats
     ResidualBank                         # bucket → RunningStat dict
     Cusum                                # two-sided change detector
@@ -53,13 +55,59 @@ Public surface:
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator
+from enum import StrEnum
 
 from coolstep.core.residual_log import ResidualLog
 
+BucketKey = tuple[int, int, int, int, int, int]
+# (load_slope_band, temp_slope_sign, accel_sign, temp_profile_band,
+#  load_pct_band, temp_history_phase)
 
-BucketKey = tuple[int, int, int, int]   # (load_band, slope_sign, accel_sign, profile_band)
+
+# --- trust-mode classifier --------------------------------------------------
+
+class TrustMode(StrEnum):
+    """Bayesian shrinkage regime for a given sample count.
+
+    PRIOR     — n == 0: no data, returns prior (0 correction, σ₀ band).
+    SHRUNK    — 0 < n < PRIOR_K: correction damped ~60%, σ wide.
+    CONFIDENT — n >= PRIOR_K: approaches pure-EWMA estimate, σ narrow.
+    """
+
+    PRIOR     = "prior"
+    SHRUNK    = "shrunk"
+    CONFIDENT = "confident"
+
+
+def classify_trust(n: int) -> TrustMode:
+    """Return the trust regime for a bucket with *n* samples."""
+    if n == 0:
+        return TrustMode.PRIOR
+    if n < int(PRIOR_K):
+        return TrustMode.SHRUNK
+    return TrustMode.CONFIDENT
+# v2 (2026-05-13): added load_pct_band as 5th axis. Previously bucket (0,0,0,1)
+# pooled idle-warm AND active-warm workloads, so a per-bucket EWMA bias learned
+# under one regime was applied to the other (operator-flagged: a background ML
+# workload kicking in from a reduced-resource schedule produced systematic
+# +20°C residuals because the bucket was holding -10°C correction learned
+# during a different workload). Splitting by current load_max bands
+# (idle/mid/high) prevents that pooling.
+#
+# v3 (2026-05-13): added temp_history_phase as 6th axis. Operator-flagged
+# pathology: bucket (0,-1,1,1,0) in live cockpit carried mean_residual=-9°C
+# with σ_linear=6.78 across n=67 — clearly pooling two regimes. Same five
+# axis-values appear both on ramp-up (chip arriving at 70°C from below) and
+# on wind-down (chip leaving 70°C from above); future peak_temp differs by
+# 10°C+ between those phases, so the bucket learns the average of two
+# opposite-sign systematic biases. Phase axis derived from T_now − T_avg_5min
+# splits the pool: each sub-bucket gets a clean bias (~+2°C ramp-up,
+# ~−3°C wind-down) and σ collapses naturally — no need for σ-shrinkage
+# (variant 2, shipped+reverted) or rule-based sanity gates (variant 3,
+# rejected by operator). KNN's killer signal "я был тут, через 30s стало
+# плохо" untouched — only the bookkeeping layer becomes regime-aware.
 
 
 # --- Bayesian shrinkage prior ------------------------------------------------
@@ -148,20 +196,76 @@ def quantise_profile_band(cpu_temp_c: float | None) -> int:
     return 2
 
 
+def quantise_load_pct_band(load_pct: float | None) -> int:
+    """Three CPU-load bands by current max-core load.  0 idle (<30%),
+    1 mid (30-70%), 2 high (≥70%).  Added 2026-05-13 as bucket-of v2's
+    5th axis: idle and active workloads share thermal trajectory shape
+    (slope/accel/temp) but produce systematically different residual
+    bias, so pooling them under the same bucket leaks correction across
+    regimes."""
+    if load_pct is None or not math.isfinite(load_pct):
+        return 1
+    if load_pct < 30.0:
+        return 0
+    if load_pct < 70.0:
+        return 1
+    return 2
+
+
+def quantise_temp_phase(
+    cpu_temp_now: float | None, cpu_temp_avg_5min: float | None
+) -> int:
+    """Three thermal-history phases derived from T_now − T_avg_5min.
+
+    0 ascending  — Δ ≥ +3°C; chip rode up recently, ramp-up regime
+    1 plateau    — |Δ| < 3°C; steady-state / direction not clear
+    2 descending — Δ ≤ −3°C; chip cooled recently, wind-down regime
+
+    Threshold ±3°C chosen so 5-min average jitter (idle-load
+    micro-fluctuations on Ryzen 7940HS ≈ ±1.5°C around equilibrium)
+    doesn't trip a phase flip. Same instantaneous (slope, accel) signal
+    appears in both ramp-up and wind-down — phase disambiguates them
+    using *recent history* without requiring the predictor to see the
+    full trajectory.
+
+    Missing inputs (cold start, <5 min of ring data) → 1 (plateau),
+    which is the natural "no information" answer: a bucket entered as
+    plateau decays toward its true bias over a few minutes once
+    cpu_temp_avg_5min stabilises."""
+    if cpu_temp_now is None or not math.isfinite(cpu_temp_now):
+        return 1
+    if cpu_temp_avg_5min is None or not math.isfinite(cpu_temp_avg_5min):
+        return 1
+    delta = cpu_temp_now - cpu_temp_avg_5min
+    if delta >= 3.0:
+        return 0
+    if delta <= -3.0:
+        return 2
+    return 1
+
+
 def bucket_of(features: dict[str, float]) -> BucketKey:
     """Project a features dict into a discrete bucket coordinate.
 
     Inputs read (all may be missing — defaults are safe):
-      cpu_load_slope_per_sec  → load_band (-1/0/+1)
-      cpu_temp_slope_per_sec  → slope_sign (-1/0/+1)
+      cpu_load_slope_per_sec    → load_slope_band (-1/0/+1)
+      cpu_temp_slope_per_sec    → temp_slope_sign (-1/0/+1)
       cpu_temp_accel_per_sec_sq → accel_sign (-1/0/+1)
-      cpu_temp_max            → profile_band (0/1/2)
+      cpu_temp_max              → temp_profile_band (0/1/2)
+      cpu_load_max              → load_pct_band (0/1/2)   (v2 2026-05-13)
+      cpu_temp_now,             → temp_history_phase (0/1/2)
+      cpu_temp_avg_5min                                   (v3 2026-05-13)
     """
     return (
         quantise_load_band(features.get("cpu_load_slope_per_sec")),
         quantise_slope_sign(features.get("cpu_temp_slope_per_sec")),
         quantise_accel_sign(features.get("cpu_temp_accel_per_sec_sq")),
         quantise_profile_band(features.get("cpu_temp_max")),
+        quantise_load_pct_band(features.get("cpu_load_max")),
+        quantise_temp_phase(
+            features.get("cpu_temp_now"),
+            features.get("cpu_temp_avg_5min"),
+        ),
     )
 
 
@@ -342,6 +446,18 @@ class ResidualBank:
         std_linear = abs(inv_log_residual(std_log_shrunk))
         return correction, std_linear, int(stat.n)
 
+    def correct_with_trust(
+        self, features: dict[str, float]
+    ) -> tuple[float, float, int, TrustMode]:
+        """Return (correction_c, std_c, sample_count, TrustMode).
+
+        Same math as `correct()` — adds the trust-mode classification so
+        callers (daemon state, dashboard) can show which shrinkage regime
+        is active without reimplementing the threshold logic.
+        """
+        correction, std, n = self.correct(features)
+        return correction, std, n, classify_trust(n)
+
     def decay_all(self, factor: float) -> None:
         for stat in self.stats.values():
             stat.decay(factor)
@@ -357,15 +473,34 @@ class ResidualBank:
         """Rebuild bank state by replaying every record in the log.
         Used at daemon startup so a restart doesn't lose learned bias.
 
-        Records without a `bucket_key` (Phase 1 entries written before
-        the meta-predictor was wired) are silently skipped — their
-        features dict is still available for *future* bucket assignment
-        but rebuilding implicit-bucket-from-features on every startup is
-        wasted I/O when the dashboard's residual-trail view doesn't care."""
+        Migration v3 (2026-05-13): bucket axis count grew 4 → 5 → 6 over
+        two same-day patches (load_pct_band, then temp_history_phase). On
+        disk we may see any of the three shapes; the current `BucketKey`
+        is 6-tuple — applying an older shape as-is would crash dict
+        access in `correct()` (mixed key shapes).
+
+        Re-bucket from `features` if present: this both upgrades old
+        records to the new schema AND lets a future axis change land
+        without re-writing the log. Records with neither a usable
+        features dict nor a 6-tuple bucket_key are skipped.
+
+        - 6-tuple bucket_key (current schema) → use as-is
+        - 4/5-tuple + features → re-bucket via bucket_of(features)
+        - non-6-tuple, no features (very old) → skip
+
+        Phase axis on re-bucketed v1/v2 records: features without
+        cpu_temp_now / cpu_temp_avg_5min land in plateau (1) — the
+        intended cold-start regime, decays to its true sub-phase once
+        live observations arrive."""
         bank = cls(alpha=alpha)
         for rec in log.iter_all():
-            if rec.bucket_key is not None and len(rec.bucket_key) == 4:
-                bank.observe_at_bucket(tuple(rec.bucket_key), rec.residual_c)  # type: ignore[arg-type]
+            key: BucketKey | None = None
+            if rec.bucket_key is not None and len(rec.bucket_key) == 6:
+                key = tuple(rec.bucket_key)  # type: ignore[assignment]
+            elif rec.features:
+                key = bucket_of(rec.features)
+            if key is not None:
+                bank.observe_at_bucket(key, rec.residual_c)
         return bank
 
 
@@ -447,10 +582,14 @@ def compose_confidence(*confidences: float) -> float:
 
 __all__ = [
     "BucketKey",
+    "TrustMode",
+    "classify_trust",
     "quantise_load_band",
     "quantise_slope_sign",
     "quantise_accel_sign",
     "quantise_profile_band",
+    "quantise_load_pct_band",
+    "quantise_temp_phase",
     "bucket_of",
     "log_residual",
     "inv_log_residual",

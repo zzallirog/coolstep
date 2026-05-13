@@ -31,18 +31,19 @@ import click
 from coolstep.adapters.actuators import discover as discover_actuators
 from coolstep.adapters.actuators._base import Actuator
 from coolstep.adapters.collectors import discover as discover_collectors
-from coolstep.adapters.storage.chroma import ChromaStore
 from coolstep.core import drift as drift_mod
 from coolstep.core import fingerprint as fp
 from coolstep.core.backfill import backfill_labels
 from coolstep.core.backfill import backfill_labels as _backfill_from_events
 from coolstep.core.calibration import evaluate as eval_calibration
+from coolstep.core.cluster_drift import DriftGate, detect_cluster_drift
 from coolstep.core.decision import DecisionEngine
+from coolstep.core.embedder_refit import refit_and_swap
 from coolstep.core.embedding import Embedder
-from coolstep.core.predictor import AlwaysIdleBaseline, KnnPredictor, TrajectoryBaseline
+from coolstep.core.knn import make_knn_store
+from coolstep.core.predictor import KnnPredictor, TrajectoryBaseline
 from coolstep.core.predictor_meta import MetaPredictor
-from coolstep.core.residual_meta import ResidualBank
-from coolstep.core.tuned_profile_watch import ProfileWatcher
+from coolstep.core.residual_meta import ResidualBank, classify_trust
 from coolstep.core.ring import Ring
 from coolstep.core.schema import (
     LABEL_COOL,
@@ -55,6 +56,7 @@ from coolstep.core.schema import (
     merge_partial,
 )
 from coolstep.core.store import Store
+from coolstep.core.tuned_profile_watch import ProfileWatcher
 
 LOOKAHEAD_SEC = 30.0
 # Operational threshold (above the per-host efficiency knee, ~5-10°C below
@@ -112,6 +114,38 @@ def _coolstep_home() -> Path:
     return Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
 
 
+def _log_backfill_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.debug("incremental backfill failed: %r", exc)
+
+
+def _log_spike_incident_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.debug("spike incident write failed: %r", exc)
+
+
+def _log_rotate_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("store rotate failed: %r", exc)
+
+
+def _log_chroma_guard_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.debug("chroma size guard failed: %r", exc)
+
+
 class Daemon:
     def __init__(
         self,
@@ -150,7 +184,7 @@ class Daemon:
         if self._embedder_stats_locked:
             log.info("embedder: loaded persisted stats from %s — refits frozen",
                      self._embedder_stats_path.name)
-        self.chroma = ChromaStore()
+        self.chroma = make_knn_store()
         self.chroma.discover()
         if self.chroma.available:
             self.predictor = MetaPredictor(
@@ -183,6 +217,14 @@ class Daemon:
         self._cached_prediction_ts: float = 0.0
         self._predict_refresh_sec: float = 3.0
         self._predict_task_inflight: bool = False
+        # Operator-visibility counters (2026-05-13): refresh ticks that re-used
+        # the stale cached_prediction because the previous refresh was still
+        # running.  When this counter climbs faster than once per second, the
+        # KNN backend is bottlenecking the predictor — dashboard surfaces it
+        # as "skipped" near the residual trail.
+        self._predict_refresh_skipped: int = 0
+        self._predict_refresh_started_at: float = 0.0
+        self._predict_refresh_last_ms: float = 0.0
         # P2.9.6 phase 3: chroma.count() and chroma.dir_size_bytes()
         # were called from _dump_ml_state EVERY tick — they walk the
         # HNSW index and the persist dir respectively, ~5-15s on a
@@ -237,6 +279,26 @@ class Daemon:
             os.environ.get("COOLSTEP_BACKFILL_INTERVAL_TICKS", "600")
         )
         self._backfill_last_tick: int = 0  # absolute tick at which last backfill ran
+        # Inflight guard for the incremental backfill batch. Without it,
+        # a slow batch (N rows × 5-30 ms each = 100-500 ms) blocked the
+        # tick coroutine — `await` returns to the event loop but the
+        # *next* tick can't start until this one finishes, so the
+        # ml-state.json freshness gap matched the batch duration. Wrap
+        # in `asyncio.to_thread` + Task handle: the tick returns
+        # immediately and the next batch isn't scheduled until the
+        # previous one drains, so we never pile up.
+        self._backfill_inflight_task: asyncio.Task[Any] | None = None
+        # 30s `_backfill_labels` inflight guard. Same shape as the batch
+        # backfill task above — labels deep buffer entries (≥30s old)
+        # against the live ring; on a busy buffer the chroma metadata
+        # updates take 1-6 s, which used to stall the tick coroutine for
+        # that entire duration via `await asyncio.to_thread`.
+        self._backfill_labels_inflight_task: asyncio.Task[Any] | None = None
+        # Pool of fire-and-forget background tasks (spike-incident writes,
+        # rotate, chroma size guard). Tracked so shutdown can await them
+        # — otherwise asyncio prints "Task was destroyed but it is pending"
+        # at process exit. Each task removes itself via a done-callback.
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
         # P3.0 Residual log + pending-prediction FIFO.  Each prediction is
         # held in `_pending_predictions` until its horizon elapses; at that
         # moment we know the actual outcome and can append a ResidualRecord.
@@ -269,6 +331,28 @@ class Daemon:
         # re-converge to the new thermal envelope.
         self._profile_watcher = ProfileWatcher()
         self._tuned_profile_changed_at: float = 0.0
+        # P2.9.7: throttle load_jump→bank decay to once per 30s. Daemon startup
+        # and rapid load oscillation can fire multiple load_jump boundaries
+        # in a few seconds; back-to-back decays compound (0.3^N → ~0) and
+        # destroy hard-won bank state. 30s window matches tuned-profile
+        # decay cadence (every_30s poll), so the two paths cost similarly.
+        self._last_bank_decay_at: float = 0.0
+        # P2.8+ drift-triggered embedder refit. Gate fires after N consecutive
+        # drift detections ≥ 1h apart; refit runs in a thread to keep ticks
+        # responsive. Cooldown via wall-clock so tick-rate changes don't
+        # disturb cadence. Env knob: COOLSTEP_REFIT_CHECK_HOURS (default 6).
+        self._drift_gate: DriftGate = DriftGate()
+        # Clamp to a half-hour floor: a misconfigured 0 / negative env would
+        # turn the wall-clock gate "always due", spawning a fresh refit
+        # thread on every tick → daemon OOM under any sustained load.
+        _refit_hours_raw = float(os.environ.get("COOLSTEP_REFIT_CHECK_HOURS", "6"))
+        self._refit_check_hours: float = max(0.5, _refit_hours_raw)
+        self._last_refit_check_at: float = 0.0
+        # Inflight guard: stops a clock-skew double-fire from racing two
+        # `staging_dir.rename(live_dir)` calls (second would FileNotFoundError
+        # mid-flight and leave the live HNSW directory half-renamed).
+        self._refit_inflight: bool = False
+        self._refit_log_path: Path = home / "embedder-refit.log"
         self._restore_runtime_state()
         # Backfill LABEL_UNKNOWN chroma vectors from `throttle_events`. Closes
         # the gap where the live +30s buffer missed an episode (long uptime
@@ -319,6 +403,22 @@ class Daemon:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
                 self._chroma_worker_task = None
+            # Drain fire-and-forget background tasks (spike-incident
+            # writes, rotate, chroma size guard, backfill). 2 s ceiling
+            # so a stuck task can't hang shutdown indefinitely.
+            pending = [t for t in self._bg_tasks if not t.done()]
+            if self._backfill_inflight_task is not None and not self._backfill_inflight_task.done():
+                pending.append(self._backfill_inflight_task)
+            if (
+                self._backfill_labels_inflight_task is not None
+                and not self._backfill_labels_inflight_task.done()
+            ):
+                pending.append(self._backfill_labels_inflight_task)
+            if pending:
+                try:
+                    await asyncio.wait(pending, timeout=2.0)
+                except Exception:  # noqa: BLE001
+                    pass
             self.store.close()
             log.info("daemon stopped after %d ticks", self._tick_count)
 
@@ -339,6 +439,58 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001
             log.debug("chroma stats refresh failed: %r", exc)
 
+    def _guarded_refit_check(self) -> None:
+        """Wrap `_embedder_refit_check` so `_refit_inflight` is always cleared,
+        even if the underlying call raises (missing store.db, hnsw load, etc.).
+        Without the guard a single failed run would pin the flag and prevent
+        any future refit until daemon restart.
+        """
+        try:
+            self._embedder_refit_check()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("embedder_refit_check raised: %r", exc)
+        finally:
+            self._refit_inflight = False
+
+    def _embedder_refit_check(self) -> None:
+        """Drift-triggered embedder refit check (P2.8+).
+
+        Runs detect_cluster_drift against the live chroma/hnsw store, feeds
+        the result into the DriftGate, and — when the gate fires — calls
+        refit_and_swap() via asyncio.to_thread in the caller. This method is
+        sync; the async wrapper above schedules it off the hot loop.
+        """
+        if not self.chroma.available:
+            return
+        drift_map = detect_cluster_drift(self.chroma)
+        self._drift_gate.record(drift_map)
+        if not self._drift_gate.should_refit():
+            log.debug(
+                "embedder_refit_check: streak=%d/%d — not yet",
+                self._drift_gate.streak_len, self._drift_gate.min_consecutive,
+            )
+            return
+        log.info(
+            "embedder_refit_check: gate fired (streak=%d) — scheduling refit",
+            self._drift_gate.streak_len,
+        )
+        spike_active = self.spike_detector.state.active
+        report = refit_and_swap(
+            store_path=self.store.path,
+            hnsw_store=self.chroma,  # type: ignore[arg-type]
+            current_embedder=self.embedder,
+            embedder_stats_path=self._embedder_stats_path,
+            refit_log_path=self._refit_log_path,
+            spike_active=bool(spike_active),
+        )
+        log.info(
+            "embedder_refit: accepted=%s parity=%.3f frames=%d duration=%.0fms reason=%r",
+            report.accepted, report.parity_pct, report.frames_used,
+            report.duration_ms, report.skipped_reason,
+        )
+        if report.accepted:
+            self._drift_gate.reset()
+
     async def _refresh_prediction(self, features: dict, window: list) -> None:
         """Background predictor refresh (P2.9.6 phase 2).
         Runs predictor.predict in a thread (KNN query is sync + slow);
@@ -350,6 +502,9 @@ class Daemon:
             )
             self._cached_prediction = pred
             self._cached_prediction_ts = time.time()
+            self._predict_refresh_last_ms = (
+                self._cached_prediction_ts - self._predict_refresh_started_at
+            ) * 1000.0
         except Exception as exc:  # noqa: BLE001
             log.warning("predict refresh failed (%s): %r",
                         type(exc).__name__, exc)
@@ -444,10 +599,16 @@ class Daemon:
             else:
                 # Warm: refresh in background, reuse cached prediction.
                 self._predict_task_inflight = True
+                self._predict_refresh_started_at = now_ts
                 asyncio.create_task(self._refresh_prediction(features, window))
                 prediction = self._cached_prediction
         else:
             prediction = self._cached_prediction
+            # Count ticks where we wanted fresh but kept stale.  Two reasons:
+            # (a) refresh still in flight (slow KNN); (b) cache fresh enough.
+            # Distinguish: inflight → genuine skip; not-stale → expected reuse.
+            if stale and self._predict_task_inflight:
+                self._predict_refresh_skipped += 1
         _mark("predict")
         # P3.0 Residual log: hold this prediction in a FIFO until its
         # horizon elapses, then write the (predicted, actual, residual)
@@ -517,6 +678,28 @@ class Daemon:
                     "event_segmenter: boundary reason=%s session=%s",
                     boundary.reason, boundary.new_session_id,
                 )
+                # P2.9.7 fix (2026-05-13): residual bank holds per-bucket
+                # EWMA bias from the *previous* workload.  When a load_jump
+                # opens a new session, that bias is stale — feature vectors
+                # of the fresh workload often land in the same coarse bucket
+                # (4 axes × 3 levels = 81 cells) and inherit a correction
+                # that was learned for a different regime.  Decay by 0.3
+                # (more aggressive than tuned-profile flip at 0.5) so the
+                # next ~10 validations re-converge.  focus_change and
+                # plateau_collapse are gentler — load_jump is the strongest
+                # regime-shift signal we have.
+                if (
+                    boundary.reason == "load_jump"
+                    and isinstance(self.predictor, MetaPredictor)
+                    and (time.time() - self._last_bank_decay_at) >= 30.0
+                ):
+                    self.predictor.bank.decay_all(0.3)
+                    self._last_bank_decay_at = time.time()
+                    log.info(
+                        "event_segmenter: load_jump → residual bank decayed "
+                        "(factor=0.3, buckets=%d)",
+                        len(self.predictor.bank),
+                    )
         except Exception as exc:  # noqa: BLE001
             log.debug("event_segmenter failed: %r", exc)
         # P2.4 — attach a curve-context payload to every curve-shaping
@@ -533,7 +716,9 @@ class Daemon:
         # The .value goes into curve_ctx_payload so the `workload_profile_shape`
         # policy can branch per profile. Heat-soak index comes from
         # fingerprint.extract() (Heavy-1 added it to the features dict).
-        from coolstep.core.workload_profile import resolve_profile  # local: avoids module-load cost when daemon doesn't fire actions
+        from coolstep.core.workload_profile import (
+            resolve_profile,  # local: avoids module-load cost when daemon doesn't fire actions
+        )
         profile = resolve_profile(workload_class, top_processes)
         heat_soak_index = float(features.get("heat_soak_index", 0.0))
         recent_throttle = self._recent_throttle_count(now=time.time())
@@ -593,7 +778,13 @@ class Daemon:
         self.ring.push(frame)
         self._labelled_window.append(frame)
         _mark("ring_push")
-        await asyncio.to_thread(self.store.write_frame, frame)
+        # Skip the per-tick sqlite write while rotate() is holding the
+        # writer lock (every 10 min, 2-5 s on a 250 MB store.db). Without
+        # this gate the tick coroutine awaits inside the worker thread and
+        # the next tick can't start until rotate finishes — visible to the
+        # operator as a 2-5 s freeze on `ml-state.json` freshness.
+        if not self.store.writes_paused:
+            await asyncio.to_thread(self.store.write_frame, frame)
         _mark("store")
         # P2.9.6: chroma.add takes ~3s on a 42k-vector HNSW index.
         # Enqueue ~1 frame per 5 sec — index already at warm size (42k+),
@@ -618,11 +809,18 @@ class Daemon:
         _mark("persist_runtime")
 
         if (self._tick_count - self._backfill_last_tick) >= self._backfill_interval_ticks:
-            try:
-                backfill_labels(self.store.path, self.chroma)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("incremental backfill failed: %r", exc)
-            self._backfill_last_tick = self._tick_count
+            if (
+                self._backfill_inflight_task is None
+                or self._backfill_inflight_task.done()
+            ):
+                task = asyncio.create_task(
+                    asyncio.to_thread(
+                        backfill_labels, self.store.path, self.chroma
+                    )
+                )
+                task.add_done_callback(_log_backfill_exception)
+                self._backfill_inflight_task = task
+                self._backfill_last_tick = self._tick_count
 
         # ml-state.json drives the live dashboard predictor dot.  Every tick
         # — atomic write of ~3 KB JSON on an NVMe is <1ms.  Previously this
@@ -645,6 +843,15 @@ class Daemon:
         # Tick-stage timings — sampled every minute for observability.
         if self._tick_count % every_min == 0 and self._tick_count > 0:
             log.info("tick %d stages (ms): %s", self._tick_count, _stage_t)
+        # Slow-tick alarm: anything over 500ms is a freshness-gap candidate.
+        # Logs the full stage map so the operator (and post-mortem) can see
+        # which marker carried the cost.
+        tick_total_ms = (time.monotonic() - _t0) * 1000
+        if tick_total_ms > 500.0:
+            log.warning(
+                "slow tick %d: %.0fms total — stages: %s",
+                self._tick_count, tick_total_ms, _stage_t,
+            )
         if self._tick_count % every_30s == 0:
             await asyncio.to_thread(self._refit_embedder)
             # Profile-flip detector.  When /etc/tuned/active_profile changes,
@@ -666,7 +873,24 @@ class Daemon:
                 )
 
         if self._tick_count % every_30s == 0 and self._tick_count > 0:
-            await asyncio.to_thread(self._backfill_labels)
+            # Fire-and-forget with inflight guard. The worker iterates a
+            # snapshot of `_labelled_window` and pushes chroma metadata
+            # updates (1-6 s on a deep buffer); the done-callback trims
+            # the live deque from the event-loop thread to keep mutations
+            # single-threaded. Skipping a firing while inflight just
+            # delays the trim by 30 s — newer frames pile up briefly,
+            # next pass processes them.
+            if (
+                self._backfill_labels_inflight_task is None
+                or self._backfill_labels_inflight_task.done()
+            ):
+                task = asyncio.create_task(
+                    asyncio.to_thread(self._backfill_labels)
+                )
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+                task.add_done_callback(self._on_backfill_labels_done)
+                self._backfill_labels_inflight_task = task
 
         # P2.9.6 phase 3: refresh cached chroma stats off the hot path.
         # Every 30s — same as backfill.  Walks HNSW + persist dir.
@@ -681,8 +905,41 @@ class Daemon:
             await asyncio.to_thread(self._append_drift_history)
 
         if self._tick_count % every_10min == 0 and self._tick_count > 0:
-            await asyncio.to_thread(self.store.rotate)
-            await asyncio.to_thread(self._chroma_size_guard)
+            # Fire-and-forget: rotate's bulk DELETE pass can hold the
+            # sqlite writer lock for 2-5 s on a 250 MB store.db, and the
+            # chroma persist-dir walk adds another 100-500 ms. Awaiting
+            # both inline would pin the tick coroutine — and therefore
+            # the next tick's `dump_ml_state` — for the full duration.
+            # `Store._writes_paused` gates per-tick `write_frame` so the
+            # rotate's DELETE doesn't get queued behind a tick.
+            rotate_task = asyncio.create_task(
+                asyncio.to_thread(self.store.rotate)
+            )
+            self._bg_tasks.add(rotate_task)
+            rotate_task.add_done_callback(self._bg_tasks.discard)
+            rotate_task.add_done_callback(_log_rotate_exception)
+            guard_task = asyncio.create_task(
+                asyncio.to_thread(self._chroma_size_guard)
+            )
+            self._bg_tasks.add(guard_task)
+            guard_task.add_done_callback(self._bg_tasks.discard)
+            guard_task.add_done_callback(_log_chroma_guard_exception)
+
+        # P2.8+ drift-triggered embedder refit check.  Runs every
+        # COOLSTEP_REFIT_CHECK_HOURS hours (default 6).  Uses wall-clock
+        # so it's immune to tick-rate changes (daemon tuning, sleep).
+        # Runs in a thread — detect_cluster_drift + refit_and_swap are sync
+        # and can take several seconds.
+        if (
+            self.chroma.available
+            and self._tick_count > 0
+            and not self._refit_inflight
+            and (time.time() - self._last_refit_check_at)
+                >= self._refit_check_hours * 3600.0
+        ):
+            self._last_refit_check_at = time.time()
+            self._refit_inflight = True
+            asyncio.create_task(asyncio.to_thread(self._guarded_refit_check))
 
         # P2.5 Heavy-3 — efficiency calibration. Scans the last 10 min
         # of frames in the ring (no sqlite query — Ring is in-memory and
@@ -932,7 +1189,9 @@ class Daemon:
         the trigger path (eject / throttle close) never blocks on this.
         """
         from coolstep.core.incidents import (
-            Incident, find_similar, log_incident,
+            Incident,
+            find_similar,
+            log_incident,
         )
         snap = self._last_incident_snapshot or {}
         if not snap:
@@ -984,7 +1243,9 @@ class Daemon:
 
         Best-effort — wrapped at caller; logs at debug on failure."""
         from coolstep.core.incidents import (
-            Incident, find_similar, log_incident,
+            Incident,
+            find_similar,
+            log_incident,
         )
         # Embed the *current* frame as the spike's feature vector — at
         # closure the chip has stabilised and that's the signature
@@ -1116,7 +1377,29 @@ class Daemon:
                         predictor_model=model_name,
                     )
                     if spike_record is not None:
-                        self._write_spike_incident(spike_record)
+                        # `_write_spike_incident` runs `find_similar` (multi-
+                        # angle KNN over Chroma) + `log_incident` (jsonl
+                        # append). On a 42k-vector index the KNN sweep is
+                        # 80-250 ms — the dominant tail in tick freezes
+                        # operator described as "тикает, потом думает".
+                        # Fire-and-forget on a worker thread keeps the
+                        # tick coroutine responsive; ordering on
+                        # incidents.jsonl is preserved by POSIX small-append
+                        # atomicity and spike closures are rare (~1/min
+                        # at peak), so we never pile up.
+                        try:
+                            loop = asyncio.get_running_loop()
+                            task = loop.create_task(
+                                asyncio.to_thread(
+                                    self._write_spike_incident, spike_record
+                                )
+                            )
+                            self._bg_tasks.add(task)
+                            task.add_done_callback(self._bg_tasks.discard)
+                            task.add_done_callback(_log_spike_incident_exception)
+                        except RuntimeError:
+                            # Not on a loop (e.g. unit test) — execute inline.
+                            self._write_spike_incident(spike_record)
                 except Exception as exc:  # noqa: BLE001
                     log.debug("spike detector update failed: %r", exc)
             except Exception as exc:  # noqa: BLE001
@@ -1331,7 +1614,8 @@ class Daemon:
         """
         try:
             from coolstep.core.efficiency_calibration import (
-                analyse_window, append_table,
+                analyse_window,
+                append_table,
             )
         except ImportError as exc:
             log.debug("efficiency pass skipped (import): %r", exc)
@@ -1410,32 +1694,66 @@ class Daemon:
         }
         self.chroma.add(frame.timestamp, vector, meta)
 
-    def _backfill_labels(self) -> None:
+    def _backfill_labels(self) -> float | None:
         """Walk the labelled-window buffer, label frames whose +30s lookahead
-        has passed, push metadata back to ChromaDB, drop them from buffer."""
+        has passed, push metadata back to ChromaDB.
+
+        Returns the trim cutoff (now - 2·LOOKAHEAD_SEC) when work was done,
+        or None if there was nothing to process. The caller is responsible
+        for trimming `_labelled_window` on the event-loop thread — this
+        method MUST NOT mutate `_labelled_window` because it now runs in a
+        worker thread while the tick coroutine keeps appending new frames.
+        """
         if not self.chroma.available or not self._labelled_window:
-            return
+            return None
         now = time.time()
-        kept: list[TelemetryFrame] = []
-        # Build a quick lookup of cpu_temp by timestamp for the buffer
-        buf_temps = []
-        for f in self._labelled_window:
-            t = f.cpu.temps_c.get("tctl") or f.cpu.temps_c.get("tdie") or 0.0
-            buf_temps.append((f.timestamp, t))
-        for f in self._labelled_window:
+        # Snapshot the deque: list(...) takes a shallow copy, immune to
+        # concurrent .append() from the tick. We process the snapshot only.
+        snapshot = list(self._labelled_window)
+        buf_temps: list[tuple[float, float]] = [
+            (
+                f.timestamp,
+                f.cpu.temps_c.get("tctl") or f.cpu.temps_c.get("tdie") or 0.0,
+            )
+            for f in snapshot
+        ]
+        for f in snapshot:
             if f.timestamp + LOOKAHEAD_SEC > now:
-                kept.append(f)
                 continue
-            future_temps = [t for ts, t in buf_temps if f.timestamp <= ts <= f.timestamp + LOOKAHEAD_SEC]
+            future_temps = [
+                t for ts, t in buf_temps
+                if f.timestamp <= ts <= f.timestamp + LOOKAHEAD_SEC
+            ]
             peak = max(future_temps) if future_temps else 0.0
             label = LABEL_HOT if peak >= HOT_THRESHOLD_C else LABEL_COOL
             self.chroma.update_metadata(
                 f.timestamp,
                 {"was_hot_in_30s": label, "peak_temp_after": float(peak)},
             )
-        # Trim buffer to recent frames only (≤ 2 × LOOKAHEAD_SEC ago)
-        cutoff = now - 2 * LOOKAHEAD_SEC
-        self._labelled_window = [f for f in kept if f.timestamp >= cutoff]
+        return now - 2 * LOOKAHEAD_SEC
+
+    def _trim_labelled_window(self, cutoff: float) -> None:
+        """Drop entries older than `cutoff` from `_labelled_window`.
+
+        Runs on the event-loop thread (called from `_on_backfill_labels_done`
+        done-callback). Frames the chroma update visited are typically older
+        than cutoff; newer frames the tick appended during the worker pass
+        survive unchanged.
+        """
+        self._labelled_window = [
+            f for f in self._labelled_window if f.timestamp >= cutoff
+        ]
+
+    def _on_backfill_labels_done(self, task: "asyncio.Task[Any]") -> None:
+        if task.cancelled():
+            return
+        try:
+            cutoff = task.result()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("_backfill_labels failed: %r", exc)
+            return
+        if cutoff is not None:
+            self._trim_labelled_window(cutoff)
 
     def _chroma_size_guard(self) -> None:
         """Watchdog for chroma persist dir bloat (incident 2026-05-04).
@@ -1533,8 +1851,36 @@ class Daemon:
             # Live spike state.  Cockpit endpoint reads this so it can
             # surface "⚡ SPIKE 12s" without a second round-trip.
             "spike": self.spike_detector.live_state(now=time.time()),
+            # Predictor refresh health (operator visibility 2026-05-13).
+            # `prediction_age_sec` is now - cached_prediction_ts (i.e. how
+            # stale the displayed forecast is); `refresh_skipped` is the
+            # count of ticks that re-used cache because the previous async
+            # refresh was still running (KNN backpressure). `refresh_ms`
+            # is wall-time of the most recent completed refresh.
+            "prediction_age_sec": round(
+                time.time() - self._cached_prediction_ts, 2
+            ) if self._cached_prediction_ts > 0 else None,
+            "predict_refresh_skipped": self._predict_refresh_skipped,
+            "predict_refresh_last_ms": round(self._predict_refresh_last_ms, 1),
+            "predict_refresh_inflight": self._predict_task_inflight,
         }
-        self.ml_state_path.write_text(json.dumps(snapshot, indent=2))
+        # P2.9.7 — surface current bucket's trust regime (prior/shrunk/confident).
+        # Cockpit uses this to render dashed vs solid forecast curve.
+        if isinstance(self.predictor, MetaPredictor):
+            from coolstep.core.residual_meta import bucket_of
+            stat = self.predictor.bank.stats.get(bucket_of(features))
+            n_now = int(stat.n) if stat is not None else 0
+        else:
+            n_now = 0
+        snapshot["trust_n"] = n_now
+        snapshot["trust_mode"] = classify_trust(n_now).value
+        # 2026-05-13: dump_ml_state was the dominant tick stage (~500 ms
+        # under 20% CPUQuota) — visible to operator as the "тикает тикает
+        # потом думает" gap.  indent=2 doubled the JSON payload size AND
+        # the serialiser CPU time; compact form cuts both ~half. The file
+        # is consumed exclusively by other Python processes (dashboard,
+        # tooling) — none of which need it pretty.
+        self.ml_state_path.write_text(json.dumps(snapshot, separators=(",", ":")))
 
 
 @click.command()

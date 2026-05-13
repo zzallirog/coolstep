@@ -133,3 +133,31 @@ def test_heat_soak_index_skipped_when_no_temp_data():
     )
     f = extract([frame])
     assert "heat_soak_index" not in f
+
+
+# ── v3 phase-bucket: cpu_temp_avg_5min ─────────────────────────────────
+
+
+def test_cpu_temp_avg_5min_uses_only_last_300_seconds():
+    """Frames older than `latest_ts − 300 s` must not pull the 5-min mean
+    toward an old regime. Construct an old-cold + recent-hot trajectory:
+    the 5-min mean should reflect the recent-hot frames only."""
+    window = [
+        _frame(0.0,   load=[10.0], tctl=50.0),    # old, outside 5-min
+        _frame(100.0, load=[10.0], tctl=50.0),    # old, outside 5-min
+        _frame(600.0, load=[80.0], tctl=78.0),    # latest_ts; recent
+        _frame(700.0, load=[80.0], tctl=80.0),    # latest_ts; recent
+        _frame(800.0, load=[80.0], tctl=82.0),    # latest_ts
+    ]
+    f = extract(window)
+    assert "cpu_temp_avg_5min" in f
+    # Cutoff = 800 − 300 = 500; only the three 78/80/82 frames qualify.
+    assert abs(f["cpu_temp_avg_5min"] - 80.0) < 1e-6
+
+
+def test_cpu_temp_avg_5min_absent_when_single_frame():
+    """Need ≥ 2 frames inside the 5-min cutoff; fewer than that, leave
+    the feature out so `quantise_temp_phase` falls back to plateau."""
+    window = [_frame(1.0, load=[10.0], tctl=70.0)]
+    f = extract(window)
+    assert "cpu_temp_avg_5min" not in f

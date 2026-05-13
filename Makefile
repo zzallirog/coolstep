@@ -1,5 +1,6 @@
 .PHONY: help install dev test lint type smoke clean install-units enable-units \
-	uninstall-units enable disable reload restart status stress-smoke health quickstart help-ops hooks release
+	uninstall-units enable disable reload restart status stress-smoke health quickstart \
+	bootstrap bootstrap-dry test-init help-ops hooks release
 
 PY ?= python
 VENV ?= .venv
@@ -19,6 +20,9 @@ help:
 	@echo "  make smoke          60s collector smoke test"
 	@echo "  make install-units  copy systemd user units to ~/.config/systemd/user/"
 	@echo "  make enable-units   enable+start collector and dashboard units"
+	@echo "  make bootstrap      self-bootstrapping init (detect hw, deps, drop-in, start)"
+	@echo "  make bootstrap-dry  dry-run bootstrap — plan only, no writes"
+	@echo "  make test-init      bash smoke tests for bootstrap (safe, --dry-run)"
 	@echo "  make clean          remove caches and venv"
 	@echo "  make help-ops       show ops targets (install/enable/restart/status/…)"
 
@@ -119,6 +123,15 @@ health:  ## Run scripts/health-report.sh
 
 quickstart:  ## Full new-host onboarding (calls scripts/quickstart.sh)
 	@./scripts/quickstart.sh
+
+bootstrap:  ## Self-bootstrapping init (hardware detect + deps + drop-in + start)
+	@./scripts/coolstep_init.sh
+
+bootstrap-dry:  ## Dry-run bootstrap — plan only, no writes
+	@./scripts/coolstep_init.sh --dry-run
+
+test-init:  ## Bash smoke tests for coolstep_init.sh (no writes, safe)
+	@bash tests/test_coolstep_init.sh
 
 help-ops:  ## Show the ops target list
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | grep -E "install-units|uninstall|enable|disable|reload|restart|status|stress|health|quickstart"

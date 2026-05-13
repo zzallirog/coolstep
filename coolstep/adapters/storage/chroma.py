@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from coolstep.core.schema import LABEL_UNKNOWN
+from coolstep.core.storage_common import normalise_metadata as _normalise_metadata
 
 log = logging.getLogger(__name__)
 
@@ -263,35 +264,6 @@ class ChromaStore:
         ]
 
 
-# ChromaDB metadata is permissive but rejects None and exotic types. The P2.5
-# label set adds three new keys (was_danger_vector, is_stable, equilibrium_rpm);
-# this helper coerces them to safe int/float and strips Nones so backfill
-# and live writes never trip "metadata value must be primitive" inside chroma.
-_INT_KEYS = ("was_hot_in_30s", "was_danger_vector", "is_stable", "fan_max_at")
-_FLOAT_KEYS = (
-    "ts",
-    "cpu_temp_at",
-    "gpu_temp_at",
-    "peak_temp_after",
-    "equilibrium_rpm",
-)
-
-
-def _normalise_metadata(meta: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, val in meta.items():
-        if val is None:
-            continue
-        if key in _INT_KEYS:
-            try:
-                out[key] = int(val)
-            except (TypeError, ValueError):
-                continue
-        elif key in _FLOAT_KEYS:
-            try:
-                out[key] = float(val)
-            except (TypeError, ValueError):
-                continue
-        else:
-            out[key] = val
-    return out
+# Metadata coercion (was inline here, lifted into coolstep/core/storage_common.py
+# so HnswStore shares the exact same key-type table — drift between the two
+# backends was a real risk during the P2.5 label additions).

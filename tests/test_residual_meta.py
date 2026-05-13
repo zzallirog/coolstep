@@ -20,6 +20,7 @@ from coolstep.core.residual_meta import (
     quantise_load_band,
     quantise_profile_band,
     quantise_slope_sign,
+    quantise_temp_phase,
 )
 
 
@@ -63,19 +64,165 @@ def test_quantise_profile_band(v, expected):
     assert quantise_profile_band(v) == expected
 
 
+@pytest.mark.parametrize("now,avg,expected", [
+    # Far above 5-min mean → ramp-up regime.
+    (75.0, 60.0, 0),
+    (73.0, 70.0, 0),    # +3°C exactly → boundary, ascending
+    # Plateau band (|Δ| < 3°C).
+    (72.0, 70.0, 1),
+    (70.0, 70.0, 1),
+    (68.0, 70.0, 1),    # −2°C, still plateau
+    # Below 5-min mean → wind-down regime.
+    (67.0, 70.0, 2),    # −3°C exactly → boundary, descending
+    (50.0, 70.0, 2),
+    # Missing inputs / NaN → safe plateau default.
+    (None, 70.0, 1),
+    (70.0, None, 1),
+    (None, None, 1),
+    (float("nan"), 70.0, 1),
+    (70.0, float("nan"), 1),
+])
+def test_quantise_temp_phase(now, avg, expected):
+    assert quantise_temp_phase(now, avg) == expected
+
+
 def test_bucket_of_full_features():
     f = {
         "cpu_load_slope_per_sec": -2.0,    # falling
         "cpu_temp_slope_per_sec": -0.1,    # neg
         "cpu_temp_accel_per_sec_sq": -0.05,  # decel
         "cpu_temp_max": 65.0,              # warm band
+        "cpu_load_max": 45.0,              # mid load band (v2 axis)
     }
-    assert bucket_of(f) == (-1, -1, -1, 1)
+    # No temp_now/avg_5min provided → phase axis (v3) defaults to plateau=1.
+    assert bucket_of(f) == (-1, -1, -1, 1, 1, 1)
 
 
 def test_bucket_of_partial_features_uses_defaults():
-    # Empty dict → defaults: (0, 0, 0, 1)
-    assert bucket_of({}) == (0, 0, 0, 1)
+    # Empty dict → defaults: (0, 0, 0, 1, 1, 1)  (v3 added 6th axis: plateau)
+    assert bucket_of({}) == (0, 0, 0, 1, 1, 1)
+
+
+def test_bucket_of_v2_load_pct_band_splits_idle_from_active():
+    """Regression (operator-flagged 2026-05-13): bucket (0,0,0,1) historically
+    pooled idle-warm AND active-warm workloads under one key. v2's load_pct
+    axis splits them so meta-correction learned under one regime no longer
+    bleeds into the other."""
+    base = {
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": 0.0,
+        "cpu_temp_accel_per_sec_sq": 0.0,
+        "cpu_temp_max": 65.0,             # warm band, same in both
+    }
+    idle = {**base, "cpu_load_max": 5.0}     # idle band
+    active = {**base, "cpu_load_max": 80.0}  # high band
+    assert bucket_of(idle) != bucket_of(active)
+    # Phase axis (v3) plateau=1 by default — no temp_now/avg_5min here.
+    assert bucket_of(idle) == (0, 0, 0, 1, 0, 1)
+    assert bucket_of(active) == (0, 0, 0, 1, 2, 1)
+
+
+def test_bucket_of_v3_phase_splits_ascending_from_descending():
+    """v3 regression (2026-05-13): the operator-flagged bucket (0,-1,1,1,0)
+    pooled ramp-up and wind-down — same instantaneous (slope, accel) appears
+    on both. Phase axis splits them by recent thermal history (T_now vs
+    T_avg_5min) so each sub-regime accumulates its own systematic bias."""
+    base = {
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": -0.1,
+        "cpu_temp_accel_per_sec_sq": +0.05,
+        "cpu_temp_max": 70.0,
+        "cpu_load_max": 20.0,
+    }
+    # Same shared axes, the only thing that moves is recent-history phase.
+    ascending = {**base, "cpu_temp_now": 75.0, "cpu_temp_avg_5min": 62.0}
+    descending = {**base, "cpu_temp_now": 70.0, "cpu_temp_avg_5min": 78.0}
+    plateau = {**base, "cpu_temp_now": 70.0, "cpu_temp_avg_5min": 71.0}
+    ka = bucket_of(ascending)
+    kd = bucket_of(descending)
+    kp = bucket_of(plateau)
+    # First five axes identical across the trio; only phase differs.
+    assert ka[:5] == kd[:5] == kp[:5]
+    assert ka[5] == 0
+    assert kp[5] == 1
+    assert kd[5] == 2
+    assert ka != kd != kp
+
+
+def test_residual_bank_no_pooling_across_phases():
+    """v3 regression: residuals of opposite sign observed under ascending
+    vs descending sub-phases used to collapse into one bucket with mean≈0.
+    With phase axis, each sub-bucket holds its own bias and `correct()`
+    returns sign-distinct corrections per phase."""
+    bank = ResidualBank()
+    base = {
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": -0.1,
+        "cpu_temp_accel_per_sec_sq": +0.05,
+        "cpu_temp_max": 70.0,
+        "cpu_load_max": 20.0,
+    }
+    ascending = {**base, "cpu_temp_now": 75.0, "cpu_temp_avg_5min": 62.0}
+    descending = {**base, "cpu_temp_now": 70.0, "cpu_temp_avg_5min": 78.0}
+    # Big n so the Bayesian shrinkage (k=5) doesn't dominate the test.
+    for _ in range(100):
+        bank.observe(ascending, +5.0)
+        bank.observe(descending, -5.0)
+    c_asc, _, _ = bank.correct(ascending)
+    c_desc, _, _ = bank.correct(descending)
+    # Without phase splitting, the same bucket would have learned mean≈0.
+    # With v3, the two phases hold opposite-sign corrections.
+    assert c_asc > +2.5
+    assert c_desc < -2.5
+    # Bank holds two distinct keys (one per phase), not one pooled one.
+    assert len(bank.stats) == 2
+
+
+def test_from_log_migrates_v2_5tuple_to_v3_6tuple(tmp_path):
+    """Migration v2→v3 (2026-05-13): on-disk 5-tuple records (load_pct
+    axis already added, phase axis not yet) must re-bucket through
+    `bucket_of(features)` so the rebuilt bank carries 6-tuple keys
+    uniformly. A v2-shaped record with no temp_now/avg_5min lands in
+    plateau (1) — the documented cold-start behaviour."""
+    import json
+    from coolstep.core.residual_log import ResidualLog
+
+    log_path = tmp_path / "residual-state.jsonl"
+    v2_record = {
+        "ts": 2000.0,
+        "predicted_at": 1970.0,
+        "horizon_sec": 30.0,
+        "predicted_temp_c": 72.0,
+        "actual_temp_c": 67.0,
+        "residual_c": -5.0,
+        "model_name": "knn_v1+meta",
+        "profile": "balanced",
+        "bucket_key": [0, 0, 0, 1, 2],   # v2 5-tuple shape
+        "features": {
+            "cpu_load_slope_per_sec": 0.0,
+            "cpu_temp_slope_per_sec": 0.0,
+            "cpu_temp_accel_per_sec_sq": 0.0,
+            "cpu_temp_max": 65.0,
+            "cpu_load_max": 80.0,
+        },
+    }
+    log_path.write_text(json.dumps(v2_record) + "\n")
+
+    bank = ResidualBank.from_log(ResidualLog(log_path))
+
+    keys = list(bank.stats.keys())
+    assert keys == [(0, 0, 0, 1, 2, 1)], (
+        f"expected v3 6-tuple from features re-bucket, got {keys}"
+    )
+    correction, _sigma, n = bank.correct({
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": 0.0,
+        "cpu_temp_accel_per_sec_sq": 0.0,
+        "cpu_temp_max": 65.0,
+        "cpu_load_max": 80.0,
+    })
+    assert n == 1
+    assert correction != 0.0
 
 
 # --- log_residual ----------------------------------------------------------
@@ -275,6 +422,56 @@ def test_residual_bank_decay_all_halves_counts():
     bank.decay_all(0.5)
     n_after = next(iter(bank.stats.values())).n
     assert abs(n_after - n_before * 0.5) < 1e-9
+
+
+def test_from_log_migrates_v1_4tuple_to_v2_5tuple(tmp_path):
+    """Migration v1→v2 (2026-05-13): records on disk carry 4-tuple bucket_key
+    from before load_pct_band was added.  from_log() must re-bucket them via
+    features so the rebuilt bank uses 5-tuple keys uniformly — otherwise
+    a later correct() call lands on a key shape mismatch."""
+    import json
+    from coolstep.core.residual_log import ResidualLog
+
+    log_path = tmp_path / "residual-state.jsonl"
+    # Synthesise a v1-shaped record: 4-tuple bucket_key + populated features.
+    v1_record = {
+        "ts": 1000.0,
+        "predicted_at": 970.0,
+        "horizon_sec": 30.0,
+        "predicted_temp_c": 70.0,
+        "actual_temp_c": 65.0,
+        "residual_c": -5.0,
+        "model_name": "knn_v1+meta",
+        "profile": "balanced",
+        "bucket_key": [0, 0, 0, 1],  # old 4-tuple shape
+        "features": {
+            "cpu_load_slope_per_sec": 0.0,
+            "cpu_temp_slope_per_sec": 0.0,
+            "cpu_temp_accel_per_sec_sq": 0.0,
+            "cpu_temp_max": 65.0,
+            "cpu_load_max": 80.0,  # high band → 5th axis = 2
+        },
+    }
+    log_path.write_text(json.dumps(v1_record) + "\n")
+
+    bank = ResidualBank.from_log(ResidualLog(log_path))
+
+    # Bank rebuilt with current 6-tuple key derived from features.
+    # Phase axis = 1 (plateau) because temp_now/avg_5min absent on v1.
+    keys = list(bank.stats.keys())
+    assert keys == [(0, 0, 0, 1, 2, 1)], (
+        f"expected v3 6-tuple from features re-bucket, got {keys}"
+    )
+    # correct() round-trips on the new key without KeyError.
+    correction, _sigma, n = bank.correct({
+        "cpu_load_slope_per_sec": 0.0,
+        "cpu_temp_slope_per_sec": 0.0,
+        "cpu_temp_accel_per_sec_sq": 0.0,
+        "cpu_temp_max": 65.0,
+        "cpu_load_max": 80.0,
+    })
+    assert n == 1
+    assert correction != 0.0
 
 
 # --- Cusum ----------------------------------------------------------

@@ -39,11 +39,10 @@ covers ~3·max_bytes worth of history.
 from __future__ import annotations
 
 import json
-import os
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024   # 10 MB per generation; ~3 days of 5s ticks
 DEFAULT_GENERATIONS = 3                 # .1 and .2 archives kept; .3 dropped
@@ -139,16 +138,53 @@ class ResidualLog:
                 src.rename(dst)
 
     def tail(self, n: int) -> list[ResidualRecord]:
-        """Return the last `n` records from the live file.  Tolerant of
-        truncated last line (in case of mid-write crash) — silently drops it."""
+        """Return the last `n` records from the live file.
+
+        Streams the file with `deque(maxlen=n)` so only the last `n` raw
+        lines stay in memory; json.loads parses those `n`, not the whole
+        file. At ~50k records (6.7MB) this cuts `/api/predictor-cockpit`
+        wall time from ~6s under quota to ~50ms (the visible "freeze every
+        5 polls" the operator reported 2026-05-13).
+        """
         if n <= 0 or not self.path.exists():
             return []
-        # For small n we can just read all and slice.  We expect O(thousands)
-        # records in the live file (10 MB ~ 50k records), so this is cheap.
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                tail_lines = deque(f, maxlen=n)
+        except OSError:
+            return []
         records: list[ResidualRecord] = []
-        for rec in self._iter_file(self.path):
-            records.append(rec)
-        return records[-n:]
+        for line in tail_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            bk = obj.get("bucket_key")
+            if bk is not None:
+                bk = tuple(int(x) for x in bk)
+            try:
+                records.append(ResidualRecord(
+                    ts=float(obj["ts"]),
+                    predicted_at=float(obj["predicted_at"]),
+                    horizon_sec=float(obj["horizon_sec"]),
+                    predicted_temp_c=float(obj["predicted_temp_c"]),
+                    actual_temp_c=float(obj["actual_temp_c"]),
+                    residual_c=float(obj["residual_c"]),
+                    model_name=str(obj["model_name"]),
+                    profile=obj.get("profile"),
+                    # default_factory=dict on the dataclass only fires when
+                    # the keyword is omitted; an explicit None here would
+                    # land verbatim and any consumer doing rec.features.items()
+                    # would AttributeError. Coerce None / missing to {}.
+                    features=dict(obj.get("features") or {}),
+                    bucket_key=bk,
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return records
 
     def iter_all(self) -> Iterator[ResidualRecord]:
         """Iterate every record, oldest archive first → live file last.

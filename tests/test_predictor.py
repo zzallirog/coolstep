@@ -89,3 +89,82 @@ def test_trajectory_baseline_output_clamped_to_silicon_envelope():
     assert pred.expected_temp_c == 120.0
     pred = p.predict({"cpu_temp_max": 21.0, "cpu_temp_slope_per_sec": -3.0}, [])
     assert pred.expected_temp_c == 20.0
+
+
+# --- Variant 1: slope-disagreement blend -----------------------------------
+
+def test_slope_blend_agreement_returns_raw_expected():
+    """When short and long slopes agree (Δ < 1.5°C/s), KNN's raw forecast
+    passes through unchanged — variant 1 only fires on disagreement."""
+    from coolstep.core.predictor import _slope_blended_expected
+    features = {
+        "cpu_temp_now": 70.0,
+        "cpu_temp_slope_per_sec_short": 0.5,
+        "cpu_temp_slope_per_sec": 0.3,
+    }
+    blended, reason = _slope_blended_expected(features, raw_expected=85.0)
+    assert blended is None
+    assert reason is None
+
+
+def test_slope_blend_cooling_dissent_pulls_expected_down():
+    """The operator-flagged failure: KNN predicts 93°C peak (hot neighbours
+    in 30s), but short slope shows the chip cooling at −2.8°C/s while
+    long slope still reports the dying ramp at +0.8°C/s. The blend
+    pulls the forecast toward the physics estimate."""
+    from coolstep.core.predictor import _slope_blended_expected
+    features = {
+        "cpu_temp_now": 72.6,
+        "cpu_temp_slope_per_sec_short": -2.8,
+        "cpu_temp_slope_per_sec": 0.81,
+    }
+    blended, reason = _slope_blended_expected(features, raw_expected=93.5)
+    assert blended is not None
+    assert reason is not None
+    # Δ = 3.61 → weight_short = (3.61-1.5)/3 = 0.70
+    # physics_est = 72.6 + (-2.8)*4*(1-exp(-30/4)) ≈ 72.6 - 11.19 = 61.4°C
+    # blended = 93.5*0.30 + 61.4*0.70 = 28.05 + 43.0 = 71.0°C
+    assert 68.0 <= blended <= 74.0
+
+
+def test_slope_blend_weight_caps_at_max():
+    """Even at extreme slope disagreement (Δ ≥ 4.5°C/s), weight_short
+    saturates at 0.8 — we never *fully* override KNN with a slope-only
+    estimate, because the slope can flap on sensor jitter."""
+    from coolstep.core.predictor import _slope_blended_expected
+    features = {
+        "cpu_temp_now": 70.0,
+        "cpu_temp_slope_per_sec_short": -5.0,
+        "cpu_temp_slope_per_sec": +3.0,
+    }
+    blended, _ = _slope_blended_expected(features, raw_expected=90.0)
+    # Δ = 8.0 → weight = 0.8 (capped). short clamped to -3.0.
+    # physics = 70 + (-3)*4*0.9994 ≈ 70 - 11.99 = 58.0°C
+    # blended = 90*0.2 + 58*0.8 = 18 + 46.4 = 64.4°C
+    assert 62.0 <= blended <= 66.5
+
+
+def test_slope_blend_missing_short_slope_skips():
+    """If short_slope feature isn't available (cold-start window), variant 1
+    must skip rather than fall through to long_slope — the whole point is
+    that the two disagree, and we can't detect disagreement with one."""
+    from coolstep.core.predictor import _slope_blended_expected
+    features = {
+        "cpu_temp_now": 70.0,
+        "cpu_temp_slope_per_sec": 0.8,
+    }
+    blended, _ = _slope_blended_expected(features, raw_expected=90.0)
+    assert blended is None
+
+
+def test_slope_blend_none_expected_skips():
+    """Defensive: raw_expected=None (KNN cold or no labeled neighbours)
+    must not crash the blend — return None up the stack."""
+    from coolstep.core.predictor import _slope_blended_expected
+    features = {
+        "cpu_temp_now": 70.0,
+        "cpu_temp_slope_per_sec_short": -2.5,
+        "cpu_temp_slope_per_sec": 0.5,
+    }
+    blended, _ = _slope_blended_expected(features, raw_expected=None)
+    assert blended is None

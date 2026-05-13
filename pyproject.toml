@@ -1,6 +1,6 @@
 [project]
 name = "coolstep"
-version = "0.5.8"
+version = "0.5.9"
 description = "Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,14 @@ ml = [
     # Collection._get). Production workaround: COOLSTEP_CHROMA_DISABLED=1 +
     # drop-in 60-chroma-disabled.conf. Tests auto-skip when chromadb>=1.0.
     "chromadb>=0.5,<1.0",
+    # HNSW backend for KNN predictor — replaces chromadb on the hot path
+    # under tight CPU-slice budgets. See ADR-022 in docs/stack-decisions.md.
+    # We pin chroma-hnswlib (chromadb's vendored fork) rather than upstream
+    # `hnswlib`: both packages install the same `hnswlib` module file, so
+    # `pip install hnswlib>=0.8` silently overwrites the fork's .so and
+    # breaks chromadb's `load_index(is_persistent_index=True)`. The fork's
+    # API is a superset of what coolstep's HnswStore needs.
+    "chroma-hnswlib>=0.7.6",
 ]
 mcp = [
     "mcp[cli]>=1.0",

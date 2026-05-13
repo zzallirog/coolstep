@@ -8,6 +8,116 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-05-13
+
+HNSW cutover + adaptive pipeline.  ChromaDB's tenant SEGV under load
+made the residual store untrustworthy as a hot-path index, so v0.5.9
+moves the KNN read-side onto a direct `hnswlib` adapter (write-side
+keeps the same store-of-record).  Cockpit gets a second pass of pin /
+canvas polish, the dashboard stops freezing under residual-log
+backlog, and the predictor learns one new trick — slope-blended
+phase-bucket fallback when fingerprint context is thin.
+
+### Added
+
+- **HNSW read adapter (`coolstep/adapters/storage/hnsw.py`).** Refresh
+  cost on the live ring dropped from ≈9790 ms (ChromaDB collection
+  scan) to ≈1.7 ms (`chroma-hnswlib >=0.7.6` HNSW query) — a 5800×
+  speedup on the dashboard's tight path.  Store-of-record stays
+  authoritative: HNSW is rebuilt on boot from `store.db` via
+  `scripts/reindex_hnsw_from_store.py`, and `scripts/cutover_to_hnsw.sh`
+  walks the operator through the migration on a live host.  Rollback
+  script (`hnsw_rollback.sh`) reverts to the Chroma path in one
+  command if the new adapter misbehaves on an unfamiliar hardware
+  profile.  Health watchdog (`watch_hnsw_health.sh`) surfaces skipped /
+  age / count anomalies.
+- **Embedder refit on drift (`coolstep/core/embedder_refit.py`).**
+  Cluster-drift detector now triggers a warm-start retrain of the
+  embedder when the bucket distribution shifts past threshold,
+  persisting the refit metadata into the store so the next daemon boot
+  picks up the new geometry without losing the calibration archive.
+- **Three trust modes for the predictor stack.** `bootstrap` /
+  `learning` / `trusted` gates rewire how meta-corrections are applied
+  — cold-start uses physics-only with KNN purely observational,
+  intermediate blends meta over a Bayesian-shrunk residual, and the
+  fully-trusted lane allows residual to anchor the forecast.  Mode
+  transitions are logged into the residual archive and surfaced on
+  the cockpit's mode pill.
+- **Spike detector → training archive (`coolstep/core/spike_detector.py`).**
+  Predictor mispredictions above the σ-corridor are now captured as
+  named events on `residual-state.jsonl` so future refits can weight
+  them explicitly instead of letting them dissolve into the
+  background.  Acts as a feedback loop between live failure and the
+  next embedder pass.
+- **Numeric residual labels on past-prediction pins.** Each pin now
+  carries its signed residual (`+1.7°`) inline, so the operator can
+  read the bucket's recent error band without reaching for the
+  meta-strip below the canvas.
+- **Scope toggle 30 / 60 / 120 s + masthead auto-hide.** The cockpit's
+  time window is operator-selectable; the masthead retracts above
+  the canvas during high-attention zoom levels so the predictive
+  geometry has the full visual budget.
+- **Endpoint cache + asyncio offload.** `/api/calibration` and
+  `/api/discoveries` are cached for 60 s and computed off the event
+  loop via `asyncio.to_thread`, killing the periodic 300-600 ms
+  dashboard hangs that surfaced during calibration recomputes.
+- **`scripts/coolstep_init.sh`.** Idempotent first-run wizard that
+  drops the platform .conf template, seeds `~/coolstep/data/`, runs
+  the bootstrap calibration, and verifies the systemd unit lights up
+  green — the previous AUR install left an operator with three manual
+  cleanup steps before the dashboard would render anything useful.
+- **`scripts/dropin-templates/`.** `desktop.conf` / `laptop.conf` /
+  `server.conf` cover the three host opory from v0.5.0's P3 design —
+  KNN brain + caps hands, Monitoring > Control, compose-not-replace.
+
+### Changed
+
+- **Stable bucket key by `predicted_at`.** Past-prediction pins were
+  keyed by `now()` of the render frame, which caused them to jitter
+  between buckets across 100 ms ticks; keying by the immutable
+  `predicted_at` timestamp pins them in place and removes the visual
+  jump that masked actual residual drift.
+- **Pin tether → past actual (vertical), drop misleading now-dot fan.**
+  Earlier display drew a sloped tether from the past prediction to
+  the current actual temperature, implying a relationship between
+  *then* and *now* that did not exist.  The corrected geometry pulls
+  the tether straight down to the actual temperature at the
+  prediction's own validation time — the only honest reading of "how
+  wrong was this pin."  The left-edge fan of now-dots that v0.5.8
+  hot-fixed has been removed entirely; pin lifetime + tether vertical
+  is now the single semantic that explains residual.
+- **KNN-vs-physics decomposition on the canvas.** When both branches
+  of the meta-blender are active, the cockpit draws them as
+  distinct curves so the operator can see which oracle is leading
+  and where they split — previously the dashboard surfaced only the
+  blended output, hiding the model-agreement signal.
+- **`residual_log.tail()` is bounded-memory streaming.** The previous
+  implementation slurped the entire residual log into memory before
+  truncating, producing 6-second freezes when the journal crossed
+  ~120 MB.  v0.5.9 reads tail-first off the file descriptor and stops
+  as soon as the requested window is satisfied.
+- **Phase-bucket slope-blend in the predictor (`coolstep/core/predictor.py`).**
+  When fingerprint context is too thin for a confident bucket lookup,
+  the predictor now blends the bucket's slope with the rolling
+  short-window slope, weighted by sample count.  Variant 1 of three
+  ablation candidates — variant 2 (σ-shrinkage) reverted under live
+  noise, variant 3 (sanity-gate) declined as net-negative.
+
+### Fixed
+
+- **ChromaDB SEGV under load on `add()`.** Pinned `chromadb==0.6.3` and
+  decoupled the hot-path read side onto HNSW, eliminating the
+  intermittent daemon crashes during high-frequency residual writes.
+- **`chroma-hnswlib` vs upstream `hnswlib` name collision.**
+  `pip install hnswlib` would silently overwrite Chroma's `.so` and
+  leave KNN returning empty results.  pyproject now pins
+  `chroma-hnswlib >=0.7.6` explicitly and the install scripts refuse
+  to proceed if upstream `hnswlib` is detected alongside it.
+- **3 BLOCKERS + 8 HIGH/MED from audit pass.** Sweep across
+  daemon, predictor, residual_log, dashboard server — version sync
+  alignment, error path coverage, and 5 new regression tests for the
+  cases the audit surfaced.
+
 ## [0.5.8] — 2026-05-13
 
 Pin lifetime + hero glide.  Two display-layer refinements on top of the

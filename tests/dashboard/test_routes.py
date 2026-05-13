@@ -690,6 +690,55 @@ def test_predictor_cockpit_forecasts_three_horizons(tmp_path, monkeypatch):
     assert abs(forecasts["h5"] - (60.0 + 20.0 * f5)) < 0.1
 
 
+def test_predictor_cockpit_forecasts_short_horizon_no_extrapolation(
+    tmp_path, monkeypatch
+):
+    """Regression (user-observed 2026-05-13): at horizon_sec=5 the dashboard
+    rendered h5=predicted, h30=predicted (hardcoded), but h15 extrapolated
+    beyond the model's horizon — producing a non-monotonic curve where h15
+    overshot below both endpoints (e.g. cur=74, pred=56.5 → h15=50.05).
+
+    Contract: when the requested horizon (5/15/30) exceeds the model's
+    horizon_sec, the cockpit must NOT silently extrapolate. It either
+    returns the predicted value (clamped at horizon_sec) or marks the
+    sample as extrapolated. Beyond-horizon samples must equal predicted
+    so the visible curve stays monotonic between cur_t and predicted."""
+    import json as _json
+
+    home = tmp_path / "cockpit-short-horizon"
+    home.mkdir()
+    (home / "ml-state.json").write_text(_json.dumps({
+        "model_name": "always_idle_baseline+meta",
+        "throttle_prob": 0.0,
+        "confidence": 0.4,
+        "expected_temp_c": 56.5,
+        "horizon_sec": 5.0,
+        "reason": "synthetic short-horizon",
+        "features": {"cpu_temp_now": 74.0, "cpu_temp_max": 74.0},
+    }))
+    monkeypatch.setenv("COOLSTEP_HOME", str(home))
+
+    from fastapi.testclient import TestClient
+
+    from coolstep.dashboard.server import create_app
+    fresh = TestClient(create_app())
+    body = fresh.get("/api/predictor-cockpit").json()
+    forecasts = body["current"]["forecasts"]
+    # At-horizon sample equals predicted.
+    assert forecasts["h5"] == 56.5
+    # Beyond-horizon samples MUST be clamped (== predicted) — not extrapolated.
+    # The pre-fix curve produced h15 = 74 + (-17.5)*1.369 ≈ 50.05 (overshoot).
+    assert forecasts["h15"] == 56.5, (
+        f"h15={forecasts['h15']} extrapolated beyond horizon=5s "
+        f"(must clamp to predicted=56.5)"
+    )
+    assert forecasts["h30"] == 56.5
+    # Monotonicity invariant: between cur_t (74) and predicted (56.5),
+    # all samples must lie within [predicted, cur_t] (cooling case).
+    for k in ("h5", "h15", "h30"):
+        assert 56.5 <= forecasts[k] <= 74.0, f"{k}={forecasts[k]} out of bounds"
+
+
 def test_predictor_cockpit_signed_median_field_present(tmp_path, monkeypatch):
     """P2.9.2: median_signed_err_c travels alongside median_abs_err_c."""
     import json as _json

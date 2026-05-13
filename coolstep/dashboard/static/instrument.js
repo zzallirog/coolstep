@@ -28,7 +28,61 @@ import { start as startStress } from './pills/stress.js';
 import { start as startCrash } from './pills/crash.js';
 import { start as startProfile } from './pills/profile.js';
 
+/* Masthead hide-on-scroll-down (2026-05-13 — operator: «самая главная
+   верхняя шапка слишком жирная и должна скрываться при скролле вниз.
+   при скролле вверх с тяжестью возвращаться»).
+   Body data attribute drives the CSS transform; hysteresis prevents
+   flicker on tiny scroll jitter.  rAF coalesces multiple scroll events
+   per frame.  Down-threshold (24 px since last decision) is larger than
+   the up-threshold (6 px) so the bar feels "heavy" coming down and
+   eager returning — matches the "тяжестью" framing.  Stays visible
+   when scrollY < 64 so the very top of the page never shows the dropped
+   state. */
+function attachMastheadAutoHide() {
+  let lastY = window.scrollY;
+  let lastDecisionY = lastY;
+  let hidden = false;
+  let raf = null;
+  const SHOW_AT_TOP = 64;
+  const DOWN_NEEDED = 24;
+  const UP_NEEDED = 6;
+  function tick() {
+    raf = null;
+    const y = window.scrollY;
+    if (y <= SHOW_AT_TOP) {
+      if (hidden) {
+        hidden = false;
+        document.documentElement.dataset.masthead = '';
+      }
+      lastY = y;
+      lastDecisionY = y;
+      return;
+    }
+    const delta = y - lastDecisionY;
+    if (!hidden && delta >= DOWN_NEEDED) {
+      hidden = true;
+      document.documentElement.dataset.masthead = 'hidden';
+      lastDecisionY = y;
+    } else if (hidden && -delta >= UP_NEEDED) {
+      hidden = false;
+      document.documentElement.dataset.masthead = '';
+      lastDecisionY = y;
+    } else if (Math.sign(delta) !== Math.sign(y - lastY)) {
+      lastDecisionY = y;  // direction flip resets the threshold anchor
+    }
+    lastY = y;
+  }
+  window.addEventListener('scroll', () => {
+    if (raf == null) raf = requestAnimationFrame(tick);
+  }, { passive: true });
+}
+
 function boot() {
+  // Masthead auto-hide attaches FIRST so a downstream pill failure
+  // can't strand the scroll behaviour (2026-05-13: previously last in
+  // boot(), one broken pill module would skip it).
+  try { attachMastheadAutoHide(); } catch (e) { console.warn('masthead auto-hide failed', e); }
+
   // i18n first: paint static markup before any pill writes over it.
   applyI18nToDom();
   LangStore.subscribe(() => applyI18nToDom());

@@ -7,6 +7,9 @@ supervised prediction (P1). Pure-Python, stdlib only — no numpy at this layer
 Features extracted (per call):
 - cpu_load_max, cpu_load_avg, cpu_load_p95
 - cpu_temp_now (last frame, "live"), cpu_temp_max, cpu_temp_avg,
+  cpu_temp_avg_5min            (mean over the last 300 s of frames —
+                                 fixed-duration window for the meta-bucket
+                                 phase axis; insensitive to ring capacity)
   cpu_temp_slope_per_sec       (linear fit over full window — slow, for
                                  bucket-key in residual meta-learner)
   cpu_temp_slope_per_sec_short (linear fit over last ~5 frames — fast,
@@ -79,6 +82,20 @@ def extract(window: Sequence[TelemetryFrame]) -> dict[str, float]:
         out["cpu_temp_avg"] = _avg(cpu_temps)
         if cpu_temp_now is not None:
             out["cpu_temp_now"] = cpu_temp_now
+        # Fixed 5-min trailing mean (relative to the latest frame's
+        # timestamp) — used by `residual_meta.quantise_temp_phase` to
+        # tag bucket regime as ascending / plateau / descending. Computed
+        # by timestamp (not frame count) so the answer is stable across
+        # collector jitter and any future ring-capacity tweak. Emitted
+        # only when ≥ 2 frames in the 5-min window carry a temp reading;
+        # otherwise the phase axis falls back to plateau (safe default).
+        cutoff_ts = window[-1].timestamp - 300.0
+        temps_5min = [
+            t for f, t in zip(window, cpu_temps_seq)
+            if t is not None and f.timestamp >= cutoff_ts
+        ]
+        if len(temps_5min) >= 2:
+            out["cpu_temp_avg_5min"] = _avg(temps_5min)
         temp_slope = _slope(window, cpu_temps)
         if temp_slope is not None:
             out["cpu_temp_slope_per_sec"] = temp_slope

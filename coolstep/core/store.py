@@ -70,6 +70,16 @@ class Store:
         self._lock = RLock()
         self._conn.executescript(SCHEMA_SQL)
         self._conn.commit()
+        # Set True while `rotate()` is holding the writer lock for the bulk
+        # DELETE pass. Per-tick callers (daemon `write_frame`) check this
+        # flag and skip the write so the tick coroutine doesn't queue on
+        # the lock; missing 1-2 frames per 10 min is acceptable, and the
+        # tick after rotate finishes captures the next frame normally.
+        self._writes_paused: bool = False
+
+    @property
+    def writes_paused(self) -> bool:
+        return self._writes_paused
 
     def write_frame(self, frame: TelemetryFrame) -> None:
         # G-9 — vendor-agnostic CPU temp shortcut.  Prior code took only AMD
@@ -186,19 +196,27 @@ class Store:
         """Drop frames older than FRAMES_TTL_SEC, events older than EVENTS_TTL_SEC.
 
         Returns (frames_deleted, events_deleted).
+
+        Sets `_writes_paused` for the duration of the bulk DELETE so the
+        daemon's per-tick `write_frame` callers skip rather than queue on
+        the writer lock — see `_writes_paused` on `__init__`.
         """
         now_ts = now if now is not None else time.time()
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM frames WHERE ts < ?", (now_ts - FRAMES_TTL_SEC,)
-            )
-            frames_del = cur.rowcount or 0
-            cur = self._conn.execute(
-                "DELETE FROM throttle_events WHERE ts_start < ?",
-                (now_ts - EVENTS_TTL_SEC,),
-            )
-            events_del = cur.rowcount or 0
-            self._conn.commit()
+        self._writes_paused = True
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "DELETE FROM frames WHERE ts < ?", (now_ts - FRAMES_TTL_SEC,)
+                )
+                frames_del = cur.rowcount or 0
+                cur = self._conn.execute(
+                    "DELETE FROM throttle_events WHERE ts_start < ?",
+                    (now_ts - EVENTS_TTL_SEC,),
+                )
+                events_del = cur.rowcount or 0
+                self._conn.commit()
+        finally:
+            self._writes_paused = False
         return frames_del, events_del
 
     def close(self) -> None:

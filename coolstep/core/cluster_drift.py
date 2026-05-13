@@ -24,6 +24,13 @@ Zero or negative drift = either improvement (cleaning) or noise.
 
 Consumed by a future dashboard tile / background task. The daemon does NOT
 call this in P2.5 — too slow for the hot loop.
+
+DriftGate (added P2.8+)
+-----------------------
+Wraps `detect_cluster_drift` and tracks consecutive drift detections over
+time. `should_refit()` returns True only when drift has been observed for
+at least `min_consecutive` analyses spaced at least `min_gap_sec` apart.
+This prevents transient noise from triggering a full embedder refit.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -38,6 +46,10 @@ log = logging.getLogger(__name__)
 RECENT_WINDOW_SEC = 24 * 3600.0
 DEFAULT_WINDOW_DAYS = 7
 MIN_SAMPLES_PER_BUCKET = 5  # below this we skip the class — too noisy
+
+# DriftGate defaults — configurable via constructor.
+DEFAULT_MIN_CONSECUTIVE = 3
+DEFAULT_MIN_GAP_SEC = 3600.0  # 1 hour between analyses
 
 
 def detect_cluster_drift(
@@ -121,3 +133,66 @@ def detect_cluster_drift(
         mean_trailing = sum(trailing[cls]) / len(trailing[cls])
         out[cls] = mean_recent - mean_trailing
     return out
+
+
+@dataclass
+class DriftGate:
+    """Stateful gate: tracks consecutive drift detections, fires refit signal.
+
+    Parameters
+    ----------
+    min_consecutive
+        How many consecutive drift detections are required before
+        `should_refit()` returns True. Default: 3.
+    min_gap_sec
+        Minimum wall-clock gap between two analyses that count as
+        «consecutive». Prevents rapid successive calls from gaming the
+        counter. Default: 3600 (1 hour).
+
+    Usage
+    -----
+    Call `record(drift_map, now=...)` after each `detect_cluster_drift`.
+    `drift_map` is considered «drifting» when it is non-empty (i.e. at least
+    one workload class shows measurable drift). Then call `should_refit()` to
+    check whether the gate has accumulated enough consecutive drifts.
+    Call `reset()` after a successful refit to clear the streak.
+    """
+
+    min_consecutive: int = DEFAULT_MIN_CONSECUTIVE
+    min_gap_sec: float = DEFAULT_MIN_GAP_SEC
+    _streak: list[float] = field(default_factory=list, repr=False)
+
+    def record(self, drift_map: dict[str, float], *, now: float | None = None) -> None:
+        """Record one analysis result.  Appends to streak on positive drift,
+        resets on empty / non-drifting map.
+
+        Note: `detect_cluster_drift` returns per-class temperature deltas in
+        either direction.  We only count POSITIVE drift (cluster running
+        hotter than the trailing baseline) toward a refit streak.  All-negative
+        maps mean the system is cooling vs. its history — that's improvement,
+        not drift; refitting the Embedder on it would burn CPU for nothing
+        and risk a parity reject loop.
+        """
+        now_ts = now if now is not None else time.time()
+        if not drift_map or not any(v > 0 for v in drift_map.values()):
+            self._streak = []
+            return
+        if self._streak:
+            gap = now_ts - self._streak[-1]
+            if gap < self.min_gap_sec:
+                # Too soon — update the timestamp in-place but don't extend streak.
+                self._streak[-1] = now_ts
+                return
+        self._streak.append(now_ts)
+
+    def should_refit(self) -> bool:
+        """Return True when consecutive drift streak has reached the threshold."""
+        return len(self._streak) >= self.min_consecutive
+
+    def reset(self) -> None:
+        """Clear streak — call after a successful refit."""
+        self._streak = []
+
+    @property
+    def streak_len(self) -> int:
+        return len(self._streak)
