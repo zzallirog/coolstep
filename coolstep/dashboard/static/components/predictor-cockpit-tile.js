@@ -354,6 +354,12 @@ export class PredictorCockpitTile extends LitElement {
     state: { state: true },
     profileFlipHighlight: { state: true },
     activeHorizon: { state: true },
+    // P2.9.5 — display layer.  Hero numbers (live-now t, predicted) tween
+    // toward the freshest fetched value via rAF, so a 13.9° → 7.5° flip
+    // from a stale → fresh prediction glides instead of teleporting.
+    // Underlying state is untouched — this is purely visual smoothing.
+    displayT: { state: true },
+    displayPred: { state: true },
   };
 
   constructor() {
@@ -362,6 +368,48 @@ export class PredictorCockpitTile extends LitElement {
     this.profileFlipHighlight = false;
     this._prevProfileChangedAt = null;
     this.activeHorizon = this._loadHorizon();
+    this.displayT = null;
+    this.displayPred = null;
+    this._tweenStart = 0;
+    this._tweenFromT = null;
+    this._tweenFromPred = null;
+    this._tweenToT = null;
+    this._tweenToPred = null;
+    this._tweenRAF = null;
+    this._tweenDurationMs = 400;  // glide window — feels reactive, not laggy
+  }
+
+  /* Cubic ease-out for the tween — fast start, soft landing. */
+  _ease(t) { const u = 1 - t; return 1 - u * u * u; }
+
+  _kickTween(toT, toPred) {
+    // Hold prev value as the "from" reference; if no previous, snap.
+    if (this.displayT == null) this.displayT = toT;
+    if (this.displayPred == null) this.displayPred = toPred;
+    this._tweenFromT = this.displayT;
+    this._tweenFromPred = this.displayPred;
+    this._tweenToT = toT;
+    this._tweenToPred = toPred;
+    this._tweenStart = performance.now();
+    if (this._tweenRAF == null) {
+      const step = () => {
+        const elapsed = performance.now() - this._tweenStart;
+        const u = Math.min(1, elapsed / this._tweenDurationMs);
+        const k = this._ease(u);
+        if (this._tweenFromT != null && this._tweenToT != null) {
+          this.displayT = this._tweenFromT + (this._tweenToT - this._tweenFromT) * k;
+        }
+        if (this._tweenFromPred != null && this._tweenToPred != null) {
+          this.displayPred = this._tweenFromPred + (this._tweenToPred - this._tweenFromPred) * k;
+        }
+        if (u < 1) {
+          this._tweenRAF = requestAnimationFrame(step);
+        } else {
+          this._tweenRAF = null;
+        }
+      };
+      this._tweenRAF = requestAnimationFrame(step);
+    }
   }
 
   _loadHorizon() {
@@ -418,6 +466,7 @@ export class PredictorCockpitTile extends LitElement {
     super.disconnectedCallback();
     this._stopped = true;
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    if (this._tweenRAF) { cancelAnimationFrame(this._tweenRAF); this._tweenRAF = null; }
   }
 
   /* Self-rescheduling timer (replaces setInterval).  setInterval drifts
@@ -468,11 +517,7 @@ export class PredictorCockpitTile extends LitElement {
     }
     this._prevProfileChangedAt = newChangedAt;
     this.state = data;
-    // P2.9.5: skip canvas repaint when the data hasn't materially
-    // changed — at 10Hz with cached daemon state, consecutive polls
-    // often return identical content within the same daemon tick.
-    // Suppressing the repaint removes the "light freezes" the
-    // operator described.  Compare predictor ts + last trail point.
+    // P2.9.5: skip canvas repaint when data hasn't materially changed.
     const cur = data?.current || {};
     const trail = data?.actual_trail || [];
     const tail = trail.length ? trail[trail.length - 1] : null;
@@ -481,6 +526,11 @@ export class PredictorCockpitTile extends LitElement {
       this._lastDrawSig = sig;
       this.updateComplete.then(() => this._draw());
     }
+    // P2.9.5 — kick rAF tween toward fresh hero values.  Display layer
+    // glides instead of jumping when predict-cache flips.
+    const toT = (cur.t != null) ? cur.t : this.displayT;
+    const toPred = this._activePredicted();
+    if (toT != null) this._kickTween(toT, toPred ?? toT);
   }
 
   /* ── Trend phrasing ──────────────────────────────────────────────────
@@ -753,41 +803,43 @@ export class PredictorCockpitTile extends LitElement {
     // oldest at α=0.4 — so the cluster near `now` doesn't read as a
     // single bright blob.  Operator-flagged 2026-05-12: under heavy
     // load the canvas filled with 12+ overlapping rings.
+    // P2.9.4 polish — pin lifetime tied to display horizon (operator
+     // 2026-05-13: «раньше они исчезали через 15 сек, или через 10 или
+     // через 5»).  Earlier hotfix clamped pins to the left edge, which
+     // produced an ever-growing fan of red rays anchored at -T_PAST.
+     // The right idea: pin's visible age equals the active horizon, then
+     // it fades to nothing — same "memory window" as the forecast curve
+     // points to, so the cockpit reads consistently.  Quadratic alpha
+     // gives a soft tail (perceptually linear).
     const rt = (this.state.residual_trail || []).slice(-8);
+    const lifetimeSec = this.activeHorizon;  // 5 / 15 / 30
     ctx.save();
-    // Reference age for the fade: use the oldest entry actually drawn.
-    const max_age = rt.reduce((m, r) => Math.max(m, r?.predicted_at_ago ?? 0), 1);
     for (const r of rt) {
       if (r.predicted_at_ago == null) continue;
-      // Clamp ring positions to the visible window instead of dropping
-      // them.  In +30s mode the prediction-validation pair lands almost
-      // exactly at the left edge (predicted ~30s ago, actual now); a
-      // strict filter erased every ring.  Clamping keeps them as
-      // boundary marks — eye still sees "the predictor's guess came
-      // due here, and reality landed there".
-      const t_pred_raw = -r.predicted_at_ago;
-      const t_act_raw  = -r.ts_ago;
-      const t_pred = Math.max(-T_PAST, t_pred_raw);
-      const t_act  = Math.max(-T_PAST, t_act_raw);
-      if (t_pred_raw < -(T_PAST + 5)) continue;  // truly off-screen — skip
+      const age = r.predicted_at_ago;
+      if (age > lifetimeSec) continue;        // expired — disappear
+      const t_pred = -age;
+      const t_act  = -r.ts_ago;
+      if (t_pred < -T_PAST) continue;          // off-screen guard
+      // Quadratic fade: α=1 at age=0 (newest), α≈0 at age=lifetime.
+      const u = age / lifetimeSec;
+      const fade = Math.max(0, (1 - u) * (1 - u));
       const abs = Math.abs(r.residual);
       const c = this._resHex(abs, palette);
       const xP = toX(t_pred);
       const yP = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.predicted)));
       const xA = toX(t_act);
       const yA = toY(Math.max(Y_MIN, Math.min(Y_MAX, r.actual)));
-      // Linear fade by age — α=1.0 at newest, α=0.4 at oldest.
-      const age_norm = r.predicted_at_ago / Math.max(1, max_age);
-      const fade = 1.0 - 0.6 * age_norm;
-      // Connector line: faint, recedes into the background as it ages.
+      // Connector — faint thread between "guessed here" and "landed there".
       ctx.strokeStyle = c;
       ctx.globalAlpha = 0.35 * fade;
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(xP, yP); ctx.lineTo(xA, yA); ctx.stroke();
-      // Hollow ring at prediction.  Slightly larger fade dampening so
-      // the newest one stays the brightest pin on the canvas.
-      ctx.globalAlpha = 0.85 * fade;
-      ctx.beginPath(); ctx.arc(xP, yP, 2.5, 0, Math.PI * 2); ctx.stroke();
+      // Hollow ring on the prediction.  Slightly bigger for younger pins
+      // so the newest reads as the brightest pin on the canvas.
+      const ringR = 2.2 + 1.4 * (1 - u);
+      ctx.globalAlpha = 0.90 * fade;
+      ctx.beginPath(); ctx.arc(xP, yP, ringR, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.restore();
   }
@@ -960,11 +1012,12 @@ export class PredictorCockpitTile extends LitElement {
      tracks line→number. */
   _deltaPredict() {
     const cur = this.state?.current || {};
-    const predicted = this._activePredicted();
-    if (cur.t == null || predicted == null) {
+    const t   = this.displayT   ?? cur.t;
+    const predicted = this.displayPred ?? this._activePredicted();
+    if (t == null || predicted == null) {
       return html`<div class="delta zero">no forecast</div>`;
     }
-    const d = predicted - cur.t;
+    const d = predicted - t;
     const h = this.activeHorizon;
     const cls = Math.abs(d) < 0.2 ? 'zero' : d > 0 ? 'up' : 'down';
     const sign = d >= 0 ? '+' : '';
@@ -1018,7 +1071,7 @@ export class PredictorCockpitTile extends LitElement {
         <div class="hero">
           <div class="col">
             <span class="eyebrow cat">live now</span>
-            <span class="metric cat">${cur.t != null ? html`${fmtNum(cur.t, 1)}<small>°C</small>` : '—'}</span>
+            <span class="metric cat">${(this.displayT ?? cur.t) != null ? html`${fmtNum(this.displayT ?? cur.t, 1)}<small>°C</small>` : '—'}</span>
             ${this._deltaPredict()}
           </div>
           <div class="col">

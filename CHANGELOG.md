@@ -8,6 +8,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-05-13
+
+Pin lifetime + hero glide.  Two display-layer refinements on top of the
+10 Hz cockpit that landed in v0.5.7: past-prediction pins now share
+their visible lifetime with the active forecast horizon, and hero
+metric numbers tween toward each freshly fetched value via
+`requestAnimationFrame` so the eye glides across cache-flips instead
+of stepping through them.
+
+### Added
+
+- **`requestAnimationFrame` tween on hero metrics.** `live now` and the
+  Δ-prediction read from `displayT` / `displayPred` Lit state which
+  glides toward the freshest fetched value over ≈400 ms (cubic
+  ease-out).  At 10 Hz refresh + 3 s predict-cache, a `13.9° → 7.5°`
+  flip stops teleporting and becomes a perceptually smooth glide —
+  the cockpit feels reactive without the data layer being touched.
+
+### Changed
+
+- **Past-prediction pins fade with the active horizon.**  Earlier hot-
+  fix clamped expired pins to the left canvas edge, producing an
+  ever-growing fan of red rays anchored at `-T_PAST`.  The right idea:
+  a pin's visible age equals the active horizon (5 / 15 / 30 s), then
+  it fades to nothing — same memory window as the forecast curve
+  points to, so the cockpit reads consistently when the operator
+  toggles between modes.  Quadratic alpha gives a soft tail; ring
+  radius also tapers with age so the newest pin is the brightest mark
+  on the canvas.  The horizon toggle now operates as a single
+  semantic lens: what you see ahead = what you remember behind.
+
+### Fixed
+
+- Cockpit's hero `live now` reading is no longer momentarily blank
+  during the very first refresh — `displayT` falls back to `cur.t`
+  before the first tween completes.
+
 ## [0.5.7] — 2026-05-13
 
 Instrument-flow release.  Daemon tick rate raised from 1 Hz to 10 Hz on
