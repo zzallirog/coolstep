@@ -94,6 +94,12 @@ class _FakeActuator:
 
 @pytest.fixture
 def daemon_factory(tmp_path, monkeypatch):
+    # COOLSTEP_HOME isolation: without this the daemon constructor reads
+    # runtime-state.json from the real ~/coolstep/data on this host, which
+    # gets rewritten 10× per second by the live collector — tests inherit
+    # whatever throttle_state happened to be on disk and fail intermittently.
+    # Point _coolstep_home() at tmp_path so recover() reads an empty dir.
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
     def _factory():
         d = Daemon(period_sec=0.05, ring_capacity=20,
                    store_path=tmp_path / "store.db",

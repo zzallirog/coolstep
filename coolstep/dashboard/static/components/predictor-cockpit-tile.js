@@ -34,6 +34,21 @@ export class PredictorCockpitTile extends LitElement {
 
       .hero { gap: var(--sp-4, 24px); }
 
+      /* P2.9.5 — soften per-tick jitter.  Hero metric numbers re-render
+         on every 1Hz fetch; without transition they snap and the eye
+         catches every change as a flicker.  Color + opacity tween makes
+         the value feel like it "settles" rather than ticks.  Tabular
+         numerals (set in base styles) keep width stable so transition
+         doesn't shift layout. */
+      .hero .metric,
+      .hero .trend-metric {
+        transition: color 80ms var(--ease-out, ease),
+                    opacity 80ms var(--ease-out, ease);
+      }
+      .hero .delta .v {
+        transition: color 80ms var(--ease-out, ease);
+      }
+
       .delta {
         font-family: var(--font-mono, monospace);
         font-size: 11px;
@@ -128,6 +143,65 @@ export class PredictorCockpitTile extends LitElement {
       .acc-chip.err   .v   { color: var(--err);  }
       .acc-chip.cold  { border-left-color: var(--fg-dim); opacity: 0.7; }
       .acc-chip.cold  .v   { color: var(--fg-muted); font-style: italic; }
+      /* P2.9.2 — signed pill: negative residual = cooling outperforms
+         historical envelope.  Tint matches the cockpit's cooling-trail
+         colour so eye links pill → canvas trail. */
+      /* Cooling-beats-forecast pill (negative residual).  Strong border
+         + tinted background so the eye picks it as "good news" amid
+         neutral chips.  Explicit hex (not var) — operator reported
+         theme variable resolved to red on this host. */
+      .acc-chip.cool  {
+        border-left-color: #7be0d4 !important;
+        background: rgba(123, 224, 212, 0.10);
+      }
+      .acc-chip.cool .v {
+        color: #7be0d4 !important;
+      }
+
+      /* P2.9.3 — horizon segmented control.  Lives in the same acc-stack
+         flex row as the err/spike pills so all "what is the predictor saying
+         right now" lives clustered.  Buttons reset-styled to look like the
+         pill chips next door.  (Note: no backticks in this comment — would
+         silently close the css template-literal; see G-10 incident.) */
+      .hz-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 2px 6px 2px 10px;
+        border-left: 2px solid var(--fg-muted, #9aa);
+        background: rgba(255, 255, 255, 0.02);
+        font-family: var(--font-mono, monospace);
+        font-size: 11px;
+      }
+      .hz-toggle .hz-lbl {
+        color: var(--fg-muted, #9aa);
+        text-transform: uppercase;
+        letter-spacing: var(--track-pill, 0.08em);
+      }
+      .hz-seg-group {
+        display: inline-flex;
+        gap: 0;
+        border: 1px solid var(--border-soft, rgba(255,255,255,0.10));
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .hz-seg {
+        appearance: none;
+        background: transparent;
+        border: 0;
+        padding: 2px 8px;
+        font: inherit;
+        color: var(--fg-muted, #9aa);
+        cursor: pointer;
+        transition: background 160ms var(--ease-out, ease), color 160ms var(--ease-out, ease);
+      }
+      .hz-seg:hover { color: var(--fg, #cfd); }
+      .hz-seg.active {
+        background: var(--cat-cooling, #7be0d4);
+        color: #061416;
+        font-weight: 600;
+      }
+      .hz-seg + .hz-seg { border-left: 1px solid var(--border-soft, rgba(255,255,255,0.10)); }
 
       /* Spike chip: appears in the same row as the ±err pills when the
          daemon-side detector is active.  Pulses softly so it reads as
@@ -268,9 +342,18 @@ export class PredictorCockpitTile extends LitElement {
   static RES_OK_C = 2.0;
   static RES_WARN_C = 5.0;
 
+  /* Available display horizons (s) for the multi-horizon toggle (P2.9.3).
+     Math always runs at +30s (KNN training lookahead); UI samples the
+     meta-anchored curve at any of these points.  Backend ships forecasts
+     dict {h5,h15,h30}; tile picks one to render. */
+  static HORIZONS = [5, 15, 30];
+  static HORIZON_DEFAULT = 5;
+  static HORIZON_STORAGE_KEY = 'coolstep:cockpit:horizon';
+
   static properties = {
     state: { state: true },
     profileFlipHighlight: { state: true },
+    activeHorizon: { state: true },
   };
 
   constructor() {
@@ -278,17 +361,97 @@ export class PredictorCockpitTile extends LitElement {
     this.state = null;
     this.profileFlipHighlight = false;
     this._prevProfileChangedAt = null;
+    this.activeHorizon = this._loadHorizon();
+  }
+
+  _loadHorizon() {
+    try {
+      const v = parseInt(localStorage.getItem(PredictorCockpitTile.HORIZON_STORAGE_KEY) || '', 10);
+      if (PredictorCockpitTile.HORIZONS.includes(v)) return v;
+    } catch (_) { /* localStorage may be blocked */ }
+    return PredictorCockpitTile.HORIZON_DEFAULT;
+  }
+
+  _setHorizon(h) {
+    if (!PredictorCockpitTile.HORIZONS.includes(h)) return;
+    this.activeHorizon = h;
+    try { localStorage.setItem(PredictorCockpitTile.HORIZON_STORAGE_KEY, String(h)); }
+    catch (_) { /* no-op */ }
+    this.updateComplete.then(() => this._draw());
+  }
+
+  /* Resolve the predicted temperature for the active horizon — prefers
+     server-side forecasts dict; falls back to legacy `predicted` (h=30s)
+     so the tile stays sensible if backend is older. */
+  _activePredicted() {
+    const cur = this.state?.current;
+    if (!cur) return null;
+    const f = cur.forecasts;
+    if (f) {
+      const key = `h${this.activeHorizon}`;
+      if (f[key] != null) return f[key];
+    }
+    return cur.predicted;
+  }
+
+  /* Horizon → weight in premises, per operator framing 2026-05-13:
+     +5s  = full meta responsiveness, predictor stays nimble (meta-led)
+     +15s = slight sacrifice of meta, deeper archive trend (balanced)
+     +30s = meta almost disabled, ~90% archive (archive-led)
+     Math-wise: the saturation curve sampled at +5s shows mostly slope-
+     driven projection (close to current + immediate dT/dt); at +30s the
+     curve has fully saturated to the KNN-anchored asymptote.  Labels
+     describe which layer is dominating what the user sees. */
+  _weightLabel() {
+    if (this.activeHorizon === 5)  return 'meta-led';
+    if (this.activeHorizon === 15) return 'balanced';
+    return 'archive-led';
   }
 
   connectedCallback() {
     super.connectedCallback();
-    this._refresh();
-    this._timer = setInterval(() => this._refresh(), 1000);
+    this._stopped = false;
+    this._scheduleRefresh(0);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    clearInterval(this._timer);
+    this._stopped = true;
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+  }
+
+  /* Self-rescheduling timer (replaces setInterval).  setInterval drifts
+     because callback execution time accumulates on top of the period
+     — operator described "тики раз в секунду, неравномерно".  Chained
+     setTimeout fires fetch → on completion measures elapsed → schedules
+     next fire to land on the next 1-second grid line.  rAF wraps the
+     post-fetch draw so canvas paint aligns to vsync (no half-frame
+     stutter when CPU is busy). */
+  _scheduleRefresh(delay) {
+    if (this._stopped) return;
+    this._timer = setTimeout(async () => {
+      if (this._stopped) return;
+      const startedAt = performance.now();
+      // Wrap in try so any single failed fetch doesn't kill the chain —
+      // at 10Hz a one-off 502 from FastAPI mid-restart used to break
+      // setTimeout chaining ("что-то прерывает", operator 2026-05-13)
+      // and the tile stayed frozen until manual browser reload.  Now
+      // a failure just skips that frame and the next tick fires normally.
+      try {
+        await this._refresh();
+      } catch (_err) {
+        /* swallow — single-poll failures must not break the loop */
+      }
+      if (this._stopped) return;
+      const elapsed = performance.now() - startedAt;
+      // 10Hz target (operator request 2026-05-13 — btop-class realtime).
+      // Daemon ticks 100ms; ml-state.json atomic-write is sub-ms; backend
+      // serves cached chroma stats so /api/predictor-cockpit returns in
+      // a few ms.  CSS transitions 80ms (below) so values feel reactive.
+      const PERIOD = 100;
+      const nextDelay = Math.max(20, PERIOD - elapsed);
+      this._scheduleRefresh(nextDelay);
+    }, delay);
   }
 
   async _refresh() {
@@ -305,7 +468,19 @@ export class PredictorCockpitTile extends LitElement {
     }
     this._prevProfileChangedAt = newChangedAt;
     this.state = data;
-    this.updateComplete.then(() => this._draw());
+    // P2.9.5: skip canvas repaint when the data hasn't materially
+    // changed — at 10Hz with cached daemon state, consecutive polls
+    // often return identical content within the same daemon tick.
+    // Suppressing the repaint removes the "light freezes" the
+    // operator described.  Compare predictor ts + last trail point.
+    const cur = data?.current || {};
+    const trail = data?.actual_trail || [];
+    const tail = trail.length ? trail[trail.length - 1] : null;
+    const sig = `${cur.ts ?? 0}|${tail?.ts_ago ?? 0}|${tail?.t ?? 0}|${this.activeHorizon}`;
+    if (sig !== this._lastDrawSig) {
+      this._lastDrawSig = sig;
+      this.updateComplete.then(() => this._draw());
+    }
   }
 
   /* ── Trend phrasing ──────────────────────────────────────────────────
@@ -385,10 +560,12 @@ export class PredictorCockpitTile extends LitElement {
     const palette = this._palette();
     const { cool, warn, err, dim, grid } = palette;
 
-    // Time-series ranges. X: −30s … +5s (35s span). Y: 40°C … 95°C.
+    // Time-series ranges. X: −30s … +Ns (35-60s span). Y: 40°C … 95°C.
+    // T_FUT respects the active horizon toggle (P2.9.3) so the canvas
+    // visually matches the Δ block — predicted endpoint sits exactly on
+    // the right edge of the chart whether user picked +5s, +15s, or +30s.
     const T_PAST = 30;
-    const horizon = (this.state.current?.horizon_sec) || 5;
-    const T_FUT  = Math.max(5, horizon);
+    const T_FUT  = this.activeHorizon || 5;
     const X_SPAN = T_PAST + T_FUT;
     const Y_MIN = 40, Y_MAX = 95;
     const PAD_L = 36, PAD_R = 8, PAD_T = 8, PAD_B = 18;
@@ -411,7 +588,16 @@ export class PredictorCockpitTile extends LitElement {
     }
     ctx.textBaseline = 'top';
     ctx.textAlign = 'center';
-    for (const t of [-30, -15, 0, T_FUT]) {
+    // Adaptive X-axis ticks (P2.9.3 polish): past side fixed at −30/−15
+    // — gives the eye stable reference points for the actual-trail.
+    // Future side scales with active horizon so canvas reads consistently
+    // when operator toggles between +5s / +15s / +30s — without this the
+    // "now" line wanders from 50% to 86% of canvas width and reads as a
+    // leftover stripe from the previous mode.
+    const futureTicks = T_FUT >= 30 ? [10, 20, T_FUT]
+                      : T_FUT >= 15 ? [5, 10, T_FUT]
+                      : [T_FUT];
+    for (const t of [-30, -15, 0, ...futureTicks]) {
       const x = toX(t);
       ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, h - PAD_B); ctx.stroke();
       const lbl = t === 0 ? 'now' : t > 0 ? `+${t}s` : `${t}s`;
@@ -488,7 +674,10 @@ export class PredictorCockpitTile extends LitElement {
       const F_h = 1 - Math.exp(-horizon / tau);
       // Fallback: if predicted is missing, fall back to raw slope so the
       // curve still has *some* trajectory rather than a flat line.
-      const Tpred = cur.predicted != null ? cur.predicted : (T0 + cur.slope * tau * F_h);
+      // Anchor curve on the horizon-active forecast (P2.9.3) so the dashed
+      // endpoint sits at the same value as the Δ block reads.
+      const activePred = this._activePredicted();
+      const Tpred = activePred != null ? activePred : (T0 + cur.slope * tau * F_h);
       const fwdPoints = [];
       for (let i = 0; i <= 24; i++) {
         const t = (i / 24) * horizon;
@@ -570,9 +759,17 @@ export class PredictorCockpitTile extends LitElement {
     const max_age = rt.reduce((m, r) => Math.max(m, r?.predicted_at_ago ?? 0), 1);
     for (const r of rt) {
       if (r.predicted_at_ago == null) continue;
-      const t_pred = -r.predicted_at_ago;
-      const t_act  = -r.ts_ago;
-      if (t_pred < -T_PAST) continue;
+      // Clamp ring positions to the visible window instead of dropping
+      // them.  In +30s mode the prediction-validation pair lands almost
+      // exactly at the left edge (predicted ~30s ago, actual now); a
+      // strict filter erased every ring.  Clamping keeps them as
+      // boundary marks — eye still sees "the predictor's guess came
+      // due here, and reality landed there".
+      const t_pred_raw = -r.predicted_at_ago;
+      const t_act_raw  = -r.ts_ago;
+      const t_pred = Math.max(-T_PAST, t_pred_raw);
+      const t_act  = Math.max(-T_PAST, t_act_raw);
+      if (t_pred_raw < -(T_PAST + 5)) continue;  // truly off-screen — skip
       const abs = Math.abs(r.residual);
       const c = this._resHex(abs, palette);
       const xP = toX(t_pred);
@@ -620,6 +817,31 @@ export class PredictorCockpitTile extends LitElement {
     return 'err';
   }
 
+  /* Signed residual → chip class (P2.9.2).  Cooling-beats-forecast semantic:
+     consistently-negative residual = predictor over-predicted, system ran
+     cooler than expected — это safe direction soft-cooling'а.  Render as
+     green («cool» variant): visible margin, not alarm.  Red reserved for
+     positive residual (under-prediction — real warning that system went
+     hotter than predictor anticipated). */
+  _signedResClass(sR) {
+    if (sR == null) return 'cold';
+    if (Math.abs(sR) < PredictorCockpitTile.RES_OK_C) return 'ok';
+    if (sR <= -PredictorCockpitTile.RES_OK_C) return 'cool';
+    if (sR > PredictorCockpitTile.RES_WARN_C) return 'err';
+    return 'warn';
+  }
+
+  /* 30-second signed median — for the cooling-wins pill semantic. */
+  _err30sSigned() {
+    const trail = this.state?.residual_trail || [];
+    const recent = trail
+      .filter((r) => r && r.ts_ago != null && r.ts_ago <= 30 && r.residual != null)
+      .map((r) => r.residual);
+    if (!recent.length) return null;
+    recent.sort((a, b) => a - b);
+    return recent[Math.floor(recent.length / 2)];
+  }
+
   /* Canvas-side colour lookup — takes a palette object built once per
      _draw call and returns the right hex for the given |residual|. */
   _resHex(absR, palette) {
@@ -663,25 +885,43 @@ export class PredictorCockpitTile extends LitElement {
   }
 
   _accuracyBadge() {
-    const med15 = this.state?.median_abs_err_c;
-    const med30 = this._err30s();
-    const cls15 = this._resClass(med15);
-    const cls30 = this._resClass(med30);
+    /* Pills use signed median (P2.9.2): consistently-negative residual =
+       predictor over-предсказал, cooling выигрывает у historical envelope.
+       Это margin coolstep'а, рендерим зелёным как «cooling beats forecast»,
+       не red.  Red reserved для positive median residual (under-prediction).
+       Falls back to abs from older backend if signed not present. */
+    const signed15 = this.state?.median_signed_err_c;
+    const signed30 = this._err30sSigned();
+    const cls15 = signed15 != null
+      ? this._signedResClass(signed15)
+      : this._resClass(this.state?.median_abs_err_c);
+    const cls30 = signed30 != null
+      ? this._signedResClass(signed30)
+      : this._resClass(this._err30s());
+    const fmtSigned = (v) => {
+      if (v == null) return '—';
+      const sign = v >= 0 ? '+' : '−';
+      return `${sign}${Math.abs(v).toFixed(1)}°`;
+    };
+    const tip15 = signed15 != null && signed15 < -PredictorCockpitTile.RES_OK_C
+      ? `predictor over-predicted by ${Math.abs(signed15).toFixed(1)}°C median over the last 15 min — cooling running ahead of historical envelope (safe direction).`
+      : 'median actual − predicted over the last 15 minutes — slow, all workloads pooled';
+    const tip30 = signed30 != null && signed30 < -PredictorCockpitTile.RES_OK_C
+      ? `predictor over-predicted by ${Math.abs(signed30).toFixed(1)}°C median over the last 30 s — cooling beating live forecast.`
+      : 'median actual − predicted over the last 30 seconds — fast, what is happening right now';
     const spike = this.state?.spike || {};
-    // The spike chip rides the same row as the err pills when the
-    // daemon-side detector is active.  Inactive → render nothing (the
-    // cockpit shouldn't carry a "no spike" chip 99% of the time).
     const spikeChip = spike.active ? this._renderSpikeChip(spike) : null;
     return html`
       <span class="acc-stack">
+        ${this._horizonToggle()}
         ${spikeChip}
-        <span class="acc-chip ${cls15}" title="median |actual − predicted| over the last 15 minutes — slow, all workloads pooled">
+        <span class="acc-chip ${cls15}" title="${tip15}">
           <span class="lbl">±err · 15m</span>
-          <span class="v">${med15 != null ? `${med15.toFixed(1)}°` : '—'}</span>
+          <span class="v">${fmtSigned(signed15 ?? this.state?.median_abs_err_c)}</span>
         </span>
-        <span class="acc-chip ${cls30}" title="median |actual − predicted| over the last 30 seconds — fast, what's happening right now">
+        <span class="acc-chip ${cls30}" title="${tip30}">
           <span class="lbl">±err · 30s</span>
-          <span class="v">${med30 != null ? `${med30.toFixed(1)}°` : '—'}</span>
+          <span class="v">${fmtSigned(signed30 ?? this._err30s())}</span>
         </span>
       </span>
     `;
@@ -720,17 +960,40 @@ export class PredictorCockpitTile extends LitElement {
      tracks line→number. */
   _deltaPredict() {
     const cur = this.state?.current || {};
-    if (cur.t == null || cur.predicted == null) {
+    const predicted = this._activePredicted();
+    if (cur.t == null || predicted == null) {
       return html`<div class="delta zero">no forecast</div>`;
     }
-    const d = cur.predicted - cur.t;
-    const h = cur.horizon_sec ?? 5;
+    const d = predicted - cur.t;
+    const h = this.activeHorizon;
     const cls = Math.abs(d) < 0.2 ? 'zero' : d > 0 ? 'up' : 'down';
     const sign = d >= 0 ? '+' : '';
     return html`
       <div class="delta ${cls}">
         <span class="v">${sign}${d.toFixed(1)}°C</span> in +${fmtNum(h, 0)}s
       </div>
+    `;
+  }
+
+  /* Segmented control: [ +5s | +15s | +30s ] with `weight: short/balanced/full`
+     subtitle.  Sits in the masthead `meta` slot beside the ±err / spike chips
+     so all the "what is the predictor currently saying about" controls cluster. */
+  _horizonToggle() {
+    const items = PredictorCockpitTile.HORIZONS.map((h) => {
+      const active = h === this.activeHorizon;
+      return html`
+        <button
+          class="hz-seg ${active ? 'active' : ''}"
+          @click=${() => this._setHorizon(h)}
+          title="Display forecast horizon — +${h}s"
+        >+${h}s</button>
+      `;
+    });
+    return html`
+      <span class="hz-toggle" title="Display horizon — math always runs at +30s (KNN lookahead); UI samples the meta-anchored curve at the selected point">
+        <span class="hz-lbl">horizon · ${this._weightLabel()}</span>
+        <span class="hz-seg-group">${items}</span>
+      </span>
     `;
   }
 

@@ -401,10 +401,14 @@ def create_app() -> FastAPI:
         # Accuracy: rolling 15-min median absolute residual.
         accuracy_pct: float | None = None
         median_abs_err: float | None = None
+        # Signed median (P2.9.2): consistently-negative residual = predictor
+        # over-предсказывает, cooling выигрывает у historical envelope. Это
+        # safe direction soft-cooling'а, рендерится зелёным.  Red reserved
+        # для positive median (under-prediction, real warning).
+        median_signed_err: float | None = None
         try:
             log = _residual_log()
             if log is not None:
-                # Walk tail until we exceed 15 min — cheap (~900 records max).
                 wide = log.tail(1024)
                 cutoff = now - 15 * 60
                 recent = [r for r in wide if r.ts >= cutoff]
@@ -412,9 +416,9 @@ def create_app() -> FastAPI:
                     abs_errs = sorted(abs(r.residual_c) for r in recent)
                     mid = abs_errs[len(abs_errs) // 2]
                     median_abs_err = round(mid, 2)
-                    # accuracy = 1 - median_abs_err / 10 (clamped 0-1)
-                    # i.e. err≤1°C → 90%+, err=5°C → 50%, err≥10°C → 0%.
                     accuracy_pct = max(0.0, min(1.0, 1.0 - mid / 10.0))
+                    signed = sorted(r.residual_c for r in recent)
+                    median_signed_err = round(signed[len(signed) // 2], 2)
         except Exception:  # noqa: BLE001
             pass
 
@@ -426,15 +430,40 @@ def create_app() -> FastAPI:
         # reports ±0.001 °C/s and looks like a dead instrument.
         short_slope = features.get("cpu_temp_slope_per_sec_short")
         long_slope = features.get("cpu_temp_slope_per_sec")
+        cur_t = float(features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0)
+        predicted = m.get("expected_temp_c")
+        horizon = m.get("horizon_sec") or 30.0
+
+        # Multi-horizon samples of the same meta-anchored forecast curve
+        # (P2.9.3).  Curve formula (ADR-021): T(t) = T0 + (Tpred − T0)·F(t)/F(h),
+        # F(t) = 1 − exp(−t/τ), τ=4s.  At t=h → Tpred exactly.  Three samples
+        # share math + cost; UI picks which horizon to display via toggle.
+        forecasts: dict[str, float] | None = None
+        if predicted is not None and cur_t > 0:
+            import math as _m
+            tau = 4.0
+            f_h = 1.0 - _m.exp(-float(horizon) / tau)
+            if f_h > 1e-6:
+                full_delta = float(predicted) - cur_t
+                def _sample(h: float) -> float:
+                    f = 1.0 - _m.exp(-h / tau)
+                    return round(cur_t + full_delta * (f / f_h), 2)
+                forecasts = {
+                    "h5":  _sample(5.0),
+                    "h15": _sample(15.0),
+                    "h30": round(float(predicted), 2),
+                }
+
         current = {
-            "t": float(features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0),
+            "t": cur_t,
             "slope": float(
                 (short_slope if short_slope is not None else long_slope) or 0.0
             ),
             "accel": float(features.get("cpu_temp_accel_per_sec_sq") or 0.0),
             "load_slope": float(features.get("cpu_load_slope_per_sec") or 0.0),
-            "predicted": m.get("expected_temp_c"),
-            "horizon_sec": m.get("horizon_sec"),
+            "predicted": predicted,
+            "horizon_sec": horizon,
+            "forecasts": forecasts,
             "confidence": m.get("confidence"),
             "model_name": m.get("model_name"),
             "reason": m.get("reason", ""),
@@ -448,6 +477,7 @@ def create_app() -> FastAPI:
             "residual_trail": residual_trail,
             "accuracy_pct": accuracy_pct,
             "median_abs_err_c": median_abs_err,
+            "median_signed_err_c": median_signed_err,
             "active_tuned_profile": m.get("active_tuned_profile"),
             "profile_changed_at": m.get("profile_changed_at"),
             "meta_buckets": m.get("meta_buckets", 0),

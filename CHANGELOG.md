@@ -8,6 +8,80 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-05-13
+
+Instrument-flow release.  Daemon tick rate raised from 1 Hz to 10 Hz on
+the same hardware after caching synchronous chroma stats off the hot
+path; cockpit gains a horizon toggle (+5s / +15s / +30s) and a second
+forecast line — pure hardware-current Newton trajectory laid over the
+KNN-anchored archive envelope so the operator reads the gap as
+installed margin instead of a single ambiguous curve.
+
+### Added
+
+- **`coolstep/core/spike_detector.py` — predictor-margin exit gate.**
+  A spike that opens on a real residual but then stays open because the
+  predictor systematically over-predicts (`signed residual ≤ −N°C` for
+  M ticks) now closes with `closure_reason="predictor_margin_exceeded"`.
+  Distinguishes "predictor was right, cooling caught up" from "real
+  interactive burst calmed" in the incident journal.
+- **Multi-horizon toggle in the cockpit** — segmented control
+  `[ +5s | +15s | +30s ]` with `meta-led / balanced / archive-led`
+  weight label.  Backend ships `forecasts: {h5, h15, h30}` sampled from
+  the same meta-anchored saturation curve; UI picks which point to
+  render.  Selection persisted in localStorage.  Δ block, canvas span,
+  and forecast curve all respect the active horizon.
+- **Signed `±err` pills.** Negative median residual now reads as
+  "cooling outperforms historical envelope" (teal/cooling tint) instead
+  of an alarming red; red is reserved for positive median (real
+  under-prediction warning).  Backend exports
+  `median_signed_err_c` alongside the existing `median_abs_err_c`.
+- **Dual-curve canvas** — hardware-current Newton τ=4s trajectory
+  drawn alongside the existing KNN-anchored saturation curve.  Solid
+  teal vs dashed teal reads as "now" vs "remembered"; the gap between
+  them is the installed cooling margin.
+- **`Embedder.save_stats() / load_stats()`** persist per-feature
+  median/MAD to `data/embedder-stats.json` so KNN queries stay in the
+  same vector space as the existing chroma index across restarts.
+- **`scripts/reindex_chroma_from_store.py`** — one-shot warm-start
+  helper rebuilds the chroma index from `store.db.frames` + `backfill_labels`.
+
+### Changed
+
+- **Daemon tick rate 1 Hz → 10 Hz** (`DEFAULT_PERIOD = 0.1`).  Hot path
+  is sample → cached predict → cached decision → store → ml-state
+  dump → out (~25 ms steady-state); periodic ops (`backfill_labels`,
+  drift history, chroma stats refresh) keep their wall-clock cadence
+  via `ticks_per_sec` scaling.
+- **chroma writes moved to a background drain worker** (bounded queue,
+  single consumer — chroma client is not thread-safe for concurrent
+  writes).  Per-tick `chroma.add` no longer blocks the tick loop on
+  HNSW index rebuild.
+- **chroma stats cached** — `chroma.count()`, `count_labeled()`,
+  `dir_size_bytes()` previously walked the 42k-vector HNSW index on
+  every `_dump_ml_state` (~6-25 s).  Refreshed every 30 s off the hot
+  path; cockpit reads cached values.
+- **Cockpit canvas redraw is signature-gated** — repaints only when
+  data has materially changed, eliminating the per-poll flicker at
+  10 Hz refresh.
+- **Cockpit refresh chain is exception-safe.** A transient fetch
+  failure no longer breaks the poll loop and freezes the tile.
+- **`/api/predictor-cockpit`** ships `forecasts` block and
+  `median_signed_err_c` alongside existing fields.
+- **Drift detector** — `chroma_no_growth` gates on `base_count > 0`
+  so a never-grown store reads as "feature disabled", not drift.
+
+### Fixed
+
+- chromadb 0.6.3 posthog telemetry wrapper silenced via monkey-patch
+  in `ChromaStore.discover()` — the wrapper's `capture()` signature
+  mismatch raised a TypeError on every chroma operation.
+- Test isolation — `daemon_factory` now `monkeypatch.setenv`'s
+  `COOLSTEP_HOME` to the test's `tmp_path`, so throttle-FSM tests no
+  longer inherit state from the live daemon's `runtime-state.json`.
+- chromadb venv pin aligned with `pyproject.toml` (`>=0.5,<1.0`) on
+  Python 3.14.
+
 ## [0.5.6] — 2026-05-13
 
 Memory sync hotfix: weight handling between the long-term archive (KNN)

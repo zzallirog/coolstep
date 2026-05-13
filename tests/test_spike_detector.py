@@ -142,3 +142,70 @@ def test_live_state_includes_thresholds_for_ui_legend():
     st = det.live_state()
     assert st["thresholds"]["entry_c"] == 5.0
     assert st["thresholds"]["exit_c"] == 2.0
+    assert st["thresholds"]["negative_exit_c"] == 5.0
+    assert st["thresholds"]["negative_exit_n"] == 10
+
+
+def test_persistent_negative_residual_closes_as_margin_exceeded():
+    """P2.9.1: spike opens on +6°C burst, then residual flips to −7°C
+    and stays there for 10 ticks → close as predictor_margin_exceeded.
+    Models the chronic-over-predict regime where cooling outperforms
+    KNN's historical envelope."""
+    det = SpikeDetector(
+        entry_thresh_c=5.0, exit_thresh_c=2.0,
+        entry_n=2, exit_n=3,
+        negative_exit_thresh_c=5.0, negative_exit_n=10,
+    )
+    # Two ticks ≥5°C → opens spike
+    # Then 10 ticks of −7°C residual → closes as margin-exceeded
+    seq = [6.0, 6.5] + [-7.0] * 10
+    outputs = _feed(det, seq)
+    closures = [o for o in outputs if o is not None]
+    assert len(closures) == 1
+    rec = closures[0]
+    assert rec.closure_reason == "predictor_margin_exceeded"
+    # spike opens at ts=1.0 (2nd high tick), closes at ts=11.0 (10th neg tick) → 10s
+    assert rec.duration_s == pytest.approx(10.0, abs=0.01)
+    assert rec.max_abs_residual >= 7.0
+    # Calmed-closure remains the default reason for normal exits
+    assert rec.to_dict()["closure_reason"] == "predictor_margin_exceeded"
+
+
+def test_neg_streak_resets_on_positive_residual():
+    """Margin-exit streak must reset when residual crosses back above
+    −threshold (oscillating real spike, not chronic conservatism)."""
+    det = SpikeDetector(negative_exit_n=10)
+    # open spike with +6° twice
+    # then 5 ticks negative, then 1 positive (resets), then 5 more negative
+    # → no margin-closure yet (max consecutive run = 5 < 10), and no calm-close
+    seq = [6.0, 6.0] + [-7.0] * 5 + [3.0] + [-7.0] * 5
+    outputs = _feed(det, seq)
+    closures = [o for o in outputs if o is not None]
+    assert closures == []
+    assert det.state.active is True
+
+
+def test_calmed_exit_takes_precedence_over_margin():
+    """If both exit gates would fire on the same tick, calmed-exit wins —
+    the genuine settle is a clearer signal than the conservative margin."""
+    det = SpikeDetector(
+        entry_thresh_c=5.0, exit_thresh_c=2.0,
+        entry_n=2, exit_n=3,
+        negative_exit_thresh_c=5.0, negative_exit_n=3,
+    )
+    # Open, then residuals deeply negative initially but converge to 0
+    seq = [6.0, 6.0, -7.0, -7.0, 0.5, 0.5, 0.5]
+    outputs = _feed(det, seq)
+    closures = [o for o in outputs if o is not None]
+    assert len(closures) == 1
+    assert closures[0].closure_reason == "calmed"
+
+
+def test_constructor_rejects_invalid_neg_exit_threshold():
+    """negative_exit_thresh_c must be positive — compared against −value."""
+    with pytest.raises(ValueError):
+        SpikeDetector(negative_exit_thresh_c=0.0)
+    with pytest.raises(ValueError):
+        SpikeDetector(negative_exit_thresh_c=-1.0)
+    with pytest.raises(ValueError):
+        SpikeDetector(negative_exit_n=0)

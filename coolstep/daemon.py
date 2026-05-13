@@ -62,7 +62,7 @@ LOOKAHEAD_SEC = 30.0
 # Override via env COOLSTEP_HOT_THRESHOLD_C if your knee is lower/higher.
 HOT_THRESHOLD_C = float(os.environ.get("COOLSTEP_HOT_THRESHOLD_C", 82.0))
 
-DEFAULT_PERIOD = 1.0
+DEFAULT_PERIOD = 0.1  # P2.9.6: 10Hz (~100ms tick budget, btop-class)
 DEFAULT_COLLECTOR_TIMEOUT = 0.3
 # Per-collector overrides (collector.name → timeout_s). hyprctl делает
 # fork+exec+IPC+JSON parse ~95 ms на спокойной системе, и легко >300 ms когда
@@ -167,6 +167,30 @@ class Daemon:
         self.calibration_ready = False
         self._stop = asyncio.Event()
         self._tick_count = 0
+        # P2.9.6 phase 1: chroma writes happen out-of-band so the per-tick
+        # loop doesn't pay HNSW index-rebuild cost.  Bounded queue +
+        # single drain worker (chroma client isn't thread-safe for
+        # concurrent writes).  Worker started lazily in run().
+        self._chroma_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=200)
+        self._chroma_worker_task: asyncio.Task[None] | None = None
+        # P2.9.6 phase 2: predictor.predict triggers a KNN query on
+        # 42k+ chroma vectors (~500ms idle, ~5s under concurrent write).
+        # Block-on-tick → daemon at 0.06Hz.  Solution: cache predict
+        # result; refresh async at most every predict_refresh_sec.
+        # Tick reads cached + decision proceeds with last known prediction.
+        # First tick blocks once to seed the cache.
+        self._cached_prediction: Any = None
+        self._cached_prediction_ts: float = 0.0
+        self._predict_refresh_sec: float = 3.0
+        self._predict_task_inflight: bool = False
+        # P2.9.6 phase 3: chroma.count() and chroma.dir_size_bytes()
+        # were called from _dump_ml_state EVERY tick — they walk the
+        # HNSW index and the persist dir respectively, ~5-15s on a
+        # 42k-vector store.  Cache them, refresh every 30 ticks.
+        self._cached_chroma_count: int = 0
+        self._cached_chroma_dir_bytes: int = 0
+        self._cached_labeled_count: int = 0
+        self._chroma_stats_refresh_every: int = 30
         self._labelled_window: list[TelemetryFrame] = []  # buffer for backfill
         self._started_at = time.time()
         # Throttle FSM: idle ↔ hot, hysteresis 90/85°C. Open «hot» episode
@@ -268,6 +292,10 @@ class Daemon:
             len(self.actuators),
             self.period,
         )
+        if self.chroma.available and self._chroma_worker_task is None:
+            self._chroma_worker_task = asyncio.create_task(
+                self._chroma_drain_worker()
+            )
         try:
             while not self._stop.is_set():
                 t0 = time.monotonic()
@@ -282,12 +310,74 @@ class Daemon:
                 except TimeoutError:
                     pass
         finally:
-            # P2.1: hardware-safety belt on shutdown — revert anything armed
-            # so SIGTERM cannot leave a fan-curve bias active forever.
             self._revert_all_armed("shutdown")
             self._persist_runtime_state()
+            if self._chroma_worker_task is not None:
+                self._chroma_worker_task.cancel()
+                try:
+                    await self._chroma_worker_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                self._chroma_worker_task = None
             self.store.close()
             log.info("daemon stopped after %d ticks", self._tick_count)
+
+    async def _refresh_chroma_stats(self) -> None:
+        """Background refresh of cached chroma stats (P2.9.6 phase 3).
+        chroma.count() / count_labeled() / dir_size_bytes() each walk the
+        HNSW index or persist dir (~5-15s on 42k vectors); kept out of
+        the hot tick path."""
+        try:
+            count, labeled, size = await asyncio.gather(
+                asyncio.to_thread(self.chroma.count),
+                asyncio.to_thread(self.chroma.count_labeled),
+                asyncio.to_thread(self.chroma.dir_size_bytes),
+            )
+            self._cached_chroma_count = int(count or 0)
+            self._cached_labeled_count = int(labeled or 0)
+            self._cached_chroma_dir_bytes = int(size or 0)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("chroma stats refresh failed: %r", exc)
+
+    async def _refresh_prediction(self, features: dict, window: list) -> None:
+        """Background predictor refresh (P2.9.6 phase 2).
+        Runs predictor.predict in a thread (KNN query is sync + slow);
+        updates the cache when done.  In-flight flag prevents stacking
+        so a slow query doesn't queue up 30 concurrent invocations."""
+        try:
+            pred = await asyncio.to_thread(
+                self.predictor.predict, features, window,
+            )
+            self._cached_prediction = pred
+            self._cached_prediction_ts = time.time()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("predict refresh failed (%s): %r",
+                        type(exc).__name__, exc)
+        finally:
+            self._predict_task_inflight = False
+
+    async def _chroma_drain_worker(self) -> None:
+        """Single-consumer drainer for the chroma write queue (P2.9.6).
+        chromadb 0.6.3 PersistentClient.add() rebuilds the HNSW index on
+        every call — ~3s for a 42k-vector collection on this host.  If
+        the tick loop awaited that directly, daemon ticked at ~0.3Hz.
+        Worker pulls frames from the queue and writes them in a thread,
+        sequentially (chroma client isn't thread-safe for concurrent
+        writes).  Drops are acceptable — fresh frames win over stale."""
+        while not self._stop.is_set():
+            try:
+                frame = await asyncio.wait_for(
+                    self._chroma_queue.get(), timeout=1.0,
+                )
+            except TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            try:
+                await asyncio.to_thread(self._chroma_write, frame)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chroma drain failed (%s): %r",
+                            type(exc).__name__, exc)
 
     def _revert_all_armed(self, reason: str) -> None:
         """Best-effort revert of every armed actuator (shutdown path).
@@ -306,11 +396,18 @@ class Daemon:
             self._armed_actions.pop(name, None)
 
     async def _tick(self) -> None:
+        # P2.9.6 — per-stage timing dump every 30 ticks until tick rate
+        # is back to ~1Hz steady-state.  Removed once issue closed.
+        _stage_t = {}
+        _t0 = time.monotonic()
+        def _mark(name: str) -> None:
+            _stage_t[name] = round((time.monotonic() - _t0) * 1000, 1)
         frame = TelemetryFrame(timestamp=time.time())
         partials = await asyncio.gather(
             *[self._sample_with_timeout(c) for c in self.collectors],
             return_exceptions=False,
         )
+        _mark("sample")
         for partial in partials:
             if partial:
                 merge_partial(frame, partial)
@@ -325,7 +422,33 @@ class Daemon:
         # hardware-safety belt independent of the predictor firing again.
         self._sweep_expired_armed(now=time.time())
 
-        prediction = self.predictor.predict(features, window)
+        # P2.9.6 phase 2: predictor.predict can take 500ms-5s depending
+        # on chroma load.  Cache + async-refresh:
+        #   - cold start: block once to seed cache (decision needs a value)
+        #   - subsequent: read cache, fire background refresh if stale
+        # Tick remains fast even on a slow KNN backend.  The few seconds
+        # of staleness are acceptable for a 30s-horizon predictor.
+        now_ts = time.time()
+        stale = (
+            self._cached_prediction is None
+            or (now_ts - self._cached_prediction_ts) > self._predict_refresh_sec
+        )
+        if stale and not self._predict_task_inflight:
+            if self._cached_prediction is None:
+                # Cold: seed cache synchronously so decision has a value.
+                prediction = await asyncio.to_thread(
+                    self.predictor.predict, features, window
+                )
+                self._cached_prediction = prediction
+                self._cached_prediction_ts = now_ts
+            else:
+                # Warm: refresh in background, reuse cached prediction.
+                self._predict_task_inflight = True
+                asyncio.create_task(self._refresh_prediction(features, window))
+                prediction = self._cached_prediction
+        else:
+            prediction = self._cached_prediction
+        _mark("predict")
         # P3.0 Residual log: hold this prediction in a FIFO until its
         # horizon elapses, then write the (predicted, actual, residual)
         # tuple to disk for the meta-predictor to learn from.  The hot
@@ -339,6 +462,7 @@ class Daemon:
             current_actual=features.get("cpu_temp_now", features.get("cpu_temp_max")),
             current_features=features,
         )
+        _mark("validate_pending")
         if prediction.expected_temp_c is not None:
             bucket_key: tuple[int, ...] | None = None
             if isinstance(self.predictor, MetaPredictor):
@@ -365,11 +489,14 @@ class Daemon:
         # Reload mode each tick — the dashboard's POST /api/mode writes
         # to runtime-state.json, daemon picks it up on the next tick
         # without restart. Read failures fall back to last-known value.
+        _mark("pre_reload_mode")
         self._reload_mode_from_state()
+        _mark("reload_mode")
         # Third defensive layer for quiet-mode: even if the predictor and
         # the decision engine both kept emitting REDUCE_NOISE, evict any
         # armed quiet bias the instant the chip crosses the eject ceiling.
         self._quiet_safety_eject(cpu_temp_c=cpu_temp_now)
+        _mark("pre_decision")
         actions = self.decision.decide(
             prediction,
             calibration_ready=self.calibration_ready,
@@ -377,6 +504,7 @@ class Daemon:
             mode=self._mode,
             cpu_temp_c=cpu_temp_now,
         )
+        _mark("after_decide")
         # P2.5 Heavy-3 — feed the segmenter every tick. The returned
         # SessionBoundary (when not None) is informative — we don't act
         # on it directly here, but the session_id is tagged on the
@@ -461,15 +589,33 @@ class Daemon:
                 action.params["curve_context"] = dict(curve_ctx_payload)
             self._route_action(action)
 
+        _mark("decision")
         self.ring.push(frame)
         self._labelled_window.append(frame)
+        _mark("ring_push")
         await asyncio.to_thread(self.store.write_frame, frame)
-        await asyncio.to_thread(self._chroma_write, frame)
+        _mark("store")
+        # P2.9.6: chroma.add takes ~3s on a 42k-vector HNSW index.
+        # Enqueue ~1 frame per 5 sec — index already at warm size (42k+),
+        # missing intermediate ticks costs ~zero training quality but
+        # keeps the drain worker from holding the GIL on the hot path.
+        chroma_write_every = max(1, int(round(5.0 / self.period)))
+        if self.chroma.available and self._tick_count % chroma_write_every == 0:
+            try:
+                self._chroma_queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                try:
+                    self._chroma_queue.get_nowait()
+                    self._chroma_queue.put_nowait(frame)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
         self._throttle_fsm_tick(frame)
+        _mark("chroma_enqueue_fsm")
         # P2.1: persist on every tick so a hard crash leaves at most one
         # tick's worth of staleness in armed_actions — next start reverts
         # within `period_sec` of restart instead of forever.
         self._persist_runtime_state()
+        _mark("persist_runtime")
 
         if (self._tick_count - self._backfill_last_tick) >= self._backfill_interval_ticks:
             try:
@@ -486,7 +632,20 @@ class Daemon:
         # polling 1 Hz.  The frontend frozen-lock discipline (5 s horizon)
         # is what should freeze the dot, not stale disk.
         await asyncio.to_thread(self._dump_ml_state, prediction, features)
-        if self._tick_count % 30 == 0:
+        _mark("dump_ml_state")
+        # P2.9.6: with daemon at 10Hz, time-based intervals must be
+        # multiplied by 10 to keep their original calendar cadence.
+        # Helper: ticks_for(seconds) = seconds / self.period (rounded).
+        ticks_per_sec = max(1, int(round(1.0 / self.period)))
+        every_30s = ticks_per_sec * 30
+        every_5min = ticks_per_sec * 300
+        every_10min = ticks_per_sec * 600
+        every_min = ticks_per_sec * 60
+
+        # Tick-stage timings — sampled every minute for observability.
+        if self._tick_count % every_min == 0 and self._tick_count > 0:
+            log.info("tick %d stages (ms): %s", self._tick_count, _stage_t)
+        if self._tick_count % every_30s == 0:
             await asyncio.to_thread(self._refit_embedder)
             # Profile-flip detector.  When /etc/tuned/active_profile changes,
             # decay the residual bank by 0.5 so the next ~10-20 validations
@@ -506,13 +665,22 @@ class Daemon:
                     new_profile, len(self.predictor.bank),
                 )
 
-        if self._tick_count % 30 == 0 and self._tick_count > 0:
+        if self._tick_count % every_30s == 0 and self._tick_count > 0:
             await asyncio.to_thread(self._backfill_labels)
 
-        if self._tick_count % 300 == 0 and self._tick_count > 0:
+        # P2.9.6 phase 3: refresh cached chroma stats off the hot path.
+        # Every 30s — same as backfill.  Walks HNSW + persist dir.
+        if (
+            self.chroma.available
+            and self._tick_count > 0
+            and self._tick_count % every_30s == 0
+        ):
+            asyncio.create_task(self._refresh_chroma_stats())
+
+        if self._tick_count % every_5min == 0 and self._tick_count > 0:
             await asyncio.to_thread(self._append_drift_history)
 
-        if self._tick_count % 600 == 0 and self._tick_count > 0:
+        if self._tick_count % every_10min == 0 and self._tick_count > 0:
             await asyncio.to_thread(self.store.rotate)
             await asyncio.to_thread(self._chroma_size_guard)
 
@@ -1302,32 +1470,21 @@ class Daemon:
             return 0
 
     def _labeled_count(self) -> int:
-        """Live count of labelled Chroma vectors (was_hot_in_30s != UNKNOWN).
+        """Cached labelled-Chroma-vector count.
 
-        Used by `_tick` to gate P2.2 RAMP_COOLING auto-fire on KNN coverage.
-        Best-effort — every error path returns 0 (i.e. "cold index, hold the
-        bias"), never raises. ChromaStore.count_labeled already swallows its
-        own exceptions; the try/except here is the belt against future
-        backends that aren't as forgiving.
+        P2.9.6: `chroma.count_labeled()` walks the 42k-vector HNSW index
+        with a where-filter on every call (~5-15 s).  Calling it from the
+        hot decision path crushed tick rate to ~0.06 Hz.  Cache lives in
+        `_cached_labeled_count`, refreshed every ~30 ticks together with
+        the other chroma stats via `_refresh_chroma_stats`.
         """
-        if not getattr(self, "chroma", None) or not self.chroma.available:
-            return 0
-        try:
-            return int(self.chroma.count_labeled())
-        except Exception:  # noqa: BLE001
-            return 0
+        return self._cached_labeled_count
 
     def _dump_ml_state(self, prediction, features: dict[str, float]) -> None:  # type: ignore[no-untyped-def]
-        # Warm-up indicator: counted labelled (was_hot_in_30s != UNKNOWN)
-        # vectors in Chroma. Predictor needs ≥ max(3, top_k//4) before it
-        # emits non-zero confidence (predictor-audit risk #4). Without this
-        # field, dashboard cannot show "N/5 labelled neighbours collected".
-        labeled_count = 0
-        try:
-            if self.chroma.available:
-                labeled_count = int(self.chroma.count_labeled())
-        except (AttributeError, Exception):  # noqa: BLE001
-            labeled_count = -1  # not exposed by store backend
+        # P2.9.6 — use cached labeled count (refreshed off the hot path
+        # every ~30 ticks).  Direct count_labeled() walks the 42k-vector
+        # HNSW index with a where-filter and took ~6s per tick.
+        labeled_count = self._cached_labeled_count if self.chroma.available else -1
         snapshot = {
             "tick": self._tick_count,
             "ts": time.time(),
@@ -1347,8 +1504,9 @@ class Daemon:
             "coverage_seconds": self.store.coverage_seconds(),
             "embedder_fitted": self.embedder.fitted,
             "chroma_available": self.chroma.available,
-            "chroma_count": self.chroma.count(),
-            "chroma_dir_bytes": self.chroma.dir_size_bytes(),
+            # P2.9.6 phase 3: cached — refreshed every ~30 ticks in tick loop.
+            "chroma_count": self._cached_chroma_count,
+            "chroma_dir_bytes": self._cached_chroma_dir_bytes,
             "uptime_sec": time.time() - self._started_at,
             "neighbours": [asdict(n) for n in (prediction.neighbours or [])][:5],
             # Warm-up + throttle FSM live state (для dashboard P1-pilot)

@@ -65,6 +65,19 @@ class ChromaStore:
         except ImportError:
             log.warning("chromadb not installed — KNN predictor disabled")
             return False
+
+        # P2.9.6 — silence chromadb 0.6.3 posthog telemetry wrapper.
+        # The wrapper's capture() signature mismatch raises TypeError on
+        # every chroma operation (ClientStart, CollectionGet, Add, Query,
+        # Update); chromadb catches the exception but the per-call overhead
+        # blocks daemon tick rate from 1Hz to ~0.05Hz (operator-observed
+        # 3 frames/min in store.db).  ANONYMIZED_TELEMETRY=False env var
+        # is ignored by 0.6.3, so we hard-noop the capture method here.
+        try:
+            from chromadb.telemetry.product import posthog as _ph
+            _ph.Posthog.capture = lambda *_a, **_kw: None
+        except (ImportError, AttributeError):
+            pass
         try:
             self._client = chromadb.PersistentClient(
                 path=str(self.persist_dir),

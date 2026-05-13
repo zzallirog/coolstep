@@ -1,6 +1,6 @@
 pkgbase = coolstep
 	pkgdesc = Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard
-	pkgver = 0.5.6
+	pkgver = 0.5.7
 	pkgrel = 1
 	url = https://github.com/zzallirog/coolstep
 	arch = any

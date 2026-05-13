@@ -651,3 +651,89 @@ def test_stress_runs_malformed_json_returns_empty(client, tmp_path, monkeypatch)
     r = client.get("/api/stress-runs")
     assert r.status_code == 200
     assert r.json() == {"runs": [], "count": 0}
+
+
+def test_predictor_cockpit_forecasts_three_horizons(tmp_path, monkeypatch):
+    """P2.9.3: /api/predictor-cockpit ships forecasts dict {h5,h15,h30}
+    sampled from the same meta-anchored saturation curve.  At h=30s the
+    sample equals `expected_temp_c` exactly; h=5s and h=15s lie between
+    current and predicted along the τ=4s Newton saturation."""
+    import json as _json
+    import math
+
+    home = tmp_path / "cockpit-forecasts"
+    home.mkdir()
+    (home / "ml-state.json").write_text(_json.dumps({
+        "model_name": "knn_v1+meta",
+        "throttle_prob": 0.0,
+        "confidence": 0.9,
+        "expected_temp_c": 80.0,
+        "horizon_sec": 30.0,
+        "reason": "synthetic",
+        "features": {"cpu_temp_now": 60.0, "cpu_temp_max": 60.0},
+    }))
+    monkeypatch.setenv("COOLSTEP_HOME", str(home))
+
+    from fastapi.testclient import TestClient
+
+    from coolstep.dashboard.server import create_app
+    fresh = TestClient(create_app())
+    body = fresh.get("/api/predictor-cockpit").json()
+    forecasts = body["current"]["forecasts"]
+    assert set(forecasts) == {"h5", "h15", "h30"}
+    # h30 exactly equals expected_temp_c
+    assert forecasts["h30"] == 80.0
+    # h5 and h15 lie monotonically between cur (60) and predicted (80)
+    assert 60.0 < forecasts["h5"] < forecasts["h15"] < forecasts["h30"]
+    # h5 ≈ 60 + 20 · (1−e^−5/4)/(1−e^−30/4) — sanity check ±0.1
+    f5 = (1 - math.exp(-5 / 4)) / (1 - math.exp(-30 / 4))
+    assert abs(forecasts["h5"] - (60.0 + 20.0 * f5)) < 0.1
+
+
+def test_predictor_cockpit_signed_median_field_present(tmp_path, monkeypatch):
+    """P2.9.2: median_signed_err_c travels alongside median_abs_err_c."""
+    import json as _json
+
+    home = tmp_path / "cockpit-signed"
+    home.mkdir()
+    (home / "ml-state.json").write_text(_json.dumps({
+        "model_name": "knn_v1+meta",
+        "throttle_prob": 0.0,
+        "confidence": 0.5,
+        "expected_temp_c": 70.0,
+        "horizon_sec": 30.0,
+        "reason": "synthetic",
+        "features": {"cpu_temp_now": 55.0, "cpu_temp_max": 55.0},
+    }))
+    monkeypatch.setenv("COOLSTEP_HOME", str(home))
+
+    from fastapi.testclient import TestClient
+
+    from coolstep.dashboard.server import create_app
+    fresh = TestClient(create_app())
+    body = fresh.get("/api/predictor-cockpit").json()
+    assert "median_signed_err_c" in body
+    assert "median_abs_err_c" in body
+
+
+def test_predictor_cockpit_no_forecasts_when_no_predicted(tmp_path, monkeypatch):
+    """If ml-state has no expected_temp_c, forecasts is None."""
+    import json as _json
+
+    home = tmp_path / "cockpit-no-pred"
+    home.mkdir()
+    (home / "ml-state.json").write_text(_json.dumps({
+        "model_name": "always_idle_baseline",
+        "throttle_prob": 0.0,
+        "confidence": 0.0,
+        "reason": "cold",
+        "features": {"cpu_temp_now": 50.0, "cpu_temp_max": 50.0},
+    }))
+    monkeypatch.setenv("COOLSTEP_HOME", str(home))
+
+    from fastapi.testclient import TestClient
+
+    from coolstep.dashboard.server import create_app
+    fresh = TestClient(create_app())
+    body = fresh.get("/api/predictor-cockpit").json()
+    assert body["current"]["forecasts"] is None

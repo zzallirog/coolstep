@@ -6,13 +6,76 @@
 > + **hw matrix harness** landed 2026-05-12 — see
 > `docs/interference-matrix.md` + `docs/hw-matrix.md`.
 
-## Phase P2.8 — Memory layers sync (started 2026-05-13)
+## Phase P2.9 — Conservative-margin instrumentation (planned 2026-05-13)
 
-Operator framing (design session 2026-05-13):
+Operator framing (design session 2026-05-13, после observing chronic
+negative-residual spike в live cockpit):
+
+> «Блин, а знаешь, он угадывает... мне казалось +30с это много, но это
+> нормальная его работа. Мне просто нравилось что тикало каждую
+> секунду и предиктило +5с.»
+
+Key insight: large negative residuals are not predictor failure — они
+показывают, что **cooling system выигрывает у historical hot envelope**
+по KNN-найденному workload pattern.  Predictor pessimistically
+matches against past hot history (safe direction for soft-cooling);
+hardware-current trajectory остывает быстрее, чем тогда; разница =
+installed margin.
+
+Architecture не трогаем (KNN bias is intentional safe direction).
+Меняем UX так, чтобы margin был **читабельным**, и state machine
+понимала свою же conservative bias.
+
+### P2.9.1 — Spike state exit on persistent negative residual
+- [ ] `core/spike_detector.py`: add exit gate «closes when residual
+      stays signed-negative beyond -N°C for M ticks» (defaults M=10,
+      N=5).  Close as `predictor_margin_exceeded`, не как настоящий
+      interactive spike.
+- [ ] Tests: no false closures on transient cooling dip mid-hot;
+      closes on sustained negative-residual margin.
+- *Why: live cockpit показывает spike kitty 2043s open 34min с
+  workload=kitty просто потому что residual стабильно −20°C → exit
+  <2°C abs недостижим.*
+
+### P2.9.2 — Signed ±err pills (cooling-wins green)
+- [ ] `dashboard/static/pills/`: ±err 15m / 30s switch from abs() to signed:
+  - residual < −threshold → green «err −X°C (cooling)»
+  - |residual| ≤ threshold → green «err ±X°C»
+  - residual > +threshold → red «err +X°C (overshoot)»
+- [ ] Red reserved для under-prediction (real warning).  Cooling-beats-
+      forecast — поэма coolstep'а, рендерим зелёным.
+
+### P2.9.3 — Multi-horizon toggle (+5s / +15s / +30s)
+- [ ] Backend: `/api/predictor-cockpit` экспортирует
+      `forecasts: {h5, h15, h30}` — three saturation extrapolations
+      из той же base/meta math (no extra inference cost).
+- [ ] Frontend (`predictor-cockpit-tile.js`): segmented control chip
+      `[ +5s | +15s | +30s ]` в header.  Active mode label «weight in
+      premises: short / balanced / full».  Hero block Δ + canvas
+      dashed forecast respect active horizon.  Persisted в localStorage.
+- [ ] Default mode = +5s (reactive tick feel).
+- *Why: operator: «нравилось что тикало каждую секунду и предиктило +5с».
+  Все три horizon'а уже в math, UI просто выбирает render.*
+
+### P2.9.4 — Dual-curve canvas (historical + current)
+- [ ] Cockpit canvas: render two forecast lines simultaneously —
+  - **historical envelope** (current dashed orange): KNN-anchored
+    saturation, «исторически так разогревалось»
+  - **hardware-current** (new solid green): pure Newton τ=4s saturation
+    on `slope_short`, «physics на текущем slope удержит h секунд»
+- [ ] Разница между линиями = installed margin (visible cooling
+      improvement vs historical baseline).
+- [ ] Legend strip: добавить две новые swatches.
+- [ ] Respects active horizon из P2.9.3.
+
+## Phase P2.8 — Memory layers sync (planned 2026-05-13)
+
+Operator framing (live session 2026-05-13, после chroma SEGV recovery):
 
 > «Важно настроить синхронизацию между двумя типами памяти и важности
 > каждого отдельного. Но основной — больший. Он умнее. Короткий всего
-> лишь ищет нарративы, и пробует угадать.»
+> лишь ищет нарративы, и пробует угадать. Он слишком много ошибается
+> без постоянной памяти.»
 
 Three memory layers exist, weakly coupled:
 
@@ -27,17 +90,15 @@ archive dominates when it has a similar moment, short-term fills the
 gap when archive is sparse, and meta-bucket bridges the cold-start
 window.
 
-### P2.8.0 — Warm-start reindex helper ✅ DONE 2026-05-13
-- [x] `scripts/reindex_chroma_from_store.py` — sqlite frames →
+### P2.8.0 — Warm-start reindex (urgent)
+- [ ] `scripts/reindex_chroma_from_store.py` — sqlite frames →
       reconstruct TelemetryFrame → embedder.embed → chroma.add →
-      backfill labels via `throttle_events`. One-shot, idempotent
-      (skip ts already in chroma).  Useful после первого fit'a
-      чтобы прогреть index из существующего store.db.
-- [x] **Embedder stats persistence** — `Embedder.save_stats()` /
-      `load_stats()` write median/MAD per feature into
-      `data/embedder-stats.json`. Daemon loads on boot and freezes
-      refits while the file is present, so vectors в chroma и live
-      query всегда живут в одном embedding space across restarts.
+      backfill labels из throttle_events. One-shot, idempotent
+      (skip ts already в chroma).  Verify post-run:
+      `chroma_count ≈ frames count` и `confidence > 0.3`.
+      *Memory anchor: live session 2026-05-13 — 41 869 frames в
+      sqlite остались dead weight для retrieval после chroma SEGV
+      recovery.*
 
 ### P2.8.1 — Fingerprint axes «когда» (P1, 1-2 days)
 - [ ] `core/fingerprint.py`:

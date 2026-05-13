@@ -1,6 +1,6 @@
 # Maintainer: zzallirog <github.com/zzallirog>
 pkgname=coolstep
-pkgver=0.5.6
+pkgver=0.5.7
 pkgrel=1
 pkgdesc="Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard"
 arch=('any')
