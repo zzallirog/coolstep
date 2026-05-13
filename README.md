@@ -7,7 +7,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.11](https://img.shields.io/badge/release-v0.5.11-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.11)
+[![v0.5.12](https://img.shields.io/badge/release-v0.5.12-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.12)
 [![tests](https://img.shields.io/badge/tests-859_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 
@@ -206,7 +206,7 @@ with system Python packages. Easy to upgrade
 **Expected output.** A progress bar, then:
 
 ```
-  installed package coolstep 0.5.11, installed using Python 3.12+
+  installed package coolstep 0.5.12, installed using Python 3.12+
   These apps are now available:
     - coolstep
     - coolstep-collector
@@ -243,7 +243,7 @@ keeps the install in `~/.local/` and never touches system packages.
 **Expected output.** Standard pip output, ending in:
 
 ```
-Successfully installed coolstep-0.5.11
+Successfully installed coolstep-0.5.12
 ```
 
 ---
