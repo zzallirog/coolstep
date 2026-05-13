@@ -266,30 +266,40 @@ Right after install — regardless of path — three things are true:
    `systemctl --user list-unit-files | grep coolstep`, but neither is
    active. You decide when to enable them.
 
-To bring the daemon up the quickest way:
+To bring the daemon up, run these four commands in order:
 
 ```bash
-bash scripts/coolstep_init.sh      # idempotent first-run wizard
-                                    # (detects laptop/desktop/server, drops the
-                                    #  matching .conf, seeds ~/coolstep/data/,
-                                    #  bootstraps calibration, verifies units)
+coolstep install-units                                                # 1. write systemd user units
+systemctl --user daemon-reload                                        # 2. let systemd see them
+systemctl --user enable --now coolstep-collector coolstep-dashboard   # 3. enable + start
+coolstep doctor                                                        # 4. verify
 xdg-open http://127.0.0.1:18889/
 ```
 
-Or step-by-step if you prefer to drive each piece yourself:
-
-```bash
-coolstep install-units             # writes systemd unit files (pipx/pip only)
-systemctl --user daemon-reload
-systemctl --user enable --now coolstep-collector coolstep-dashboard
-xdg-open http://127.0.0.1:18889/
-```
+That sequence is the same for both Path A (pipx) and Path B (pip --user)
+and does not require a checkout of this repository — every step uses
+the `coolstep` binary that was placed on your `PATH`.
 
 `coolstep install-units` drops the unit files into
 `~/.config/systemd/user/`.  pipx and pip don't install systemd units
 automatically, so this step is needed for non-AUR installs.  If you
 installed via a future AUR package, the units are already in
 `/usr/lib/systemd/user/` and you can skip this command.
+
+**Optional — first-run wizard.** If you have a local git checkout of
+this repository, you can replace step 1 with the bundled wizard:
+
+```bash
+git clone https://github.com/zzallirog/coolstep && cd coolstep
+coolstep install-units             # the wizard restarts units, so install them first
+bash scripts/coolstep_init.sh      # detects laptop/desktop/server, drops the
+                                    # matching .conf, seeds ~/coolstep/data/,
+                                    # bootstraps calibration, verifies units
+```
+
+The wizard is a convenience for people working from a clone; without
+the clone, the four-command sequence above does the same job minus the
+auto-detected profile drop-in.
 
 `enable --now` does two things at once: marks the units to start at
 login and starts them immediately. Without `--now`, they'd only fire
@@ -325,11 +335,27 @@ override — and even then, only after the eight calibration gates
   on `MetaPredictor(TrajectoryBaseline + ResidualBank)` if the KNN
   store is unavailable. See
   [troubleshooting](docs/troubleshooting.md#chromadb-segfaults-on-python-314).
-- **KNN backend (optional `[ml]` extras):** `pip install "coolstep[ml]"`
-  pulls `chromadb<1.0` + `chroma-hnswlib>=0.7.6`. Do **not** install
-  bare upstream `hnswlib` alongside — both packages ship the same
-  `hnswlib` module file, and the upstream `.so` will silently
-  overwrite the chroma fork's, leaving KNN queries returning empty.
+- **KNN backend (optional `[ml]` extras).** The install command differs
+  by path because `pipx`-installed projects can't be re-resolved with a
+  bare `pip install pkg[extra]` — pip won't see the existing pipx venv:
+
+  ```bash
+  # Path A (pipx) — inject extras into the same isolated venv:
+  pipx inject coolstep "chromadb<1.0" "chroma-hnswlib>=0.7.6"
+
+  # Path B (pip --user) — extras work the standard way:
+  pip install --user --break-system-packages "coolstep[ml]"
+  ```
+
+  Either form pulls `chromadb<1.0` + `chroma-hnswlib>=0.7.6` into the
+  right place. Without ML extras the daemon still runs — it just falls
+  back to `MetaPredictor(TrajectoryBaseline + ResidualBank)` and skips
+  the KNN read-path.
+
+  Do **not** install bare upstream `hnswlib` alongside — both packages
+  ship the same `hnswlib` module file, and the upstream `.so` will
+  silently overwrite the chroma fork's, leaving KNN queries returning
+  empty.
 - One of `pipx`, `pip`, or `uv` (most distros have at least one
   pre-installed; minimal hosts like Proxmox base or Alpine may need a
   one-time install — see
