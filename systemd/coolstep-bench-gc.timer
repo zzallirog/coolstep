@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly trigger for coolstep bench/gc.py
+Wants=coolstep-bench-gc.service
+
+[Timer]
+# Every Sunday 03:00 local time
+OnCalendar=Sun *-*-* 03:00:00
+# Catch up if missed (sleep, suspend)
+Persistent=true
+# Randomize by 10 min to avoid pile-up if multiple users
+RandomizedDelaySec=600
+Unit=coolstep-bench-gc.service
+
+[Install]
+WantedBy=timers.target
