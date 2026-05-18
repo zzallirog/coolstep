@@ -1,0 +1,68 @@
+name: 🐛 Bug report
+description: "Something's broken or behaving unexpectedly."
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing! The single most useful artifact for triage is
+        `coolstep compat --json`. If you haven't checked it yet, the
+        [troubleshooting guide](https://github.com/zzallirog/coolstep/blob/master/docs/troubleshooting.md)
+        covers every warning that `coolstep compat` can print.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: "What did you expect, what did you see instead?"
+      placeholder: "Ran `coolstep compat`, expected the dashboard to start, got…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: compat
+    attributes:
+      label: "`coolstep compat --json` output"
+      description: "Paste the full JSON. Redact anything you consider sensitive."
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`coolstep doctor` output (optional but helpful)"
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon logs
+      description: "`journalctl --user -u coolstep-collector -n 100` if the daemon is enabled."
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: install-path
+    attributes:
+      label: How did you install coolstep?
+      options:
+        - "pipx install"
+        - "pip install --user"
+        - "Local AUR build (makepkg -si)"
+        - "From source (pip install -e .)"
+        - "Other (describe in 'What happened?')"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: coolstep version
+      description: "`coolstep --version` or commit hash if installed from git"
+      placeholder: "0.5.0"
+    validations:
+      required: true

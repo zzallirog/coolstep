@@ -1,0 +1,1131 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * coolstep / INSTRUMENT — visual identity v0.4.0
+ *
+ * Concept: a field-notebook for a thermal instrument. The dashboard is
+ * staged as a working scientist's logbook — not a glass admin panel. The
+ * vocabulary borrows from Tektronix/HP scope plates of the 70s, NACA
+ * technical reports, and IBM design manuals: warm cream ink on deep
+ * graphite, hairline drafting grid, registration marks at every corner,
+ * figure-style section numerals on each tile.
+ *
+ * Typography is the load-bearing decision:
+ *   - Instrument Serif (italic)  → wordmark, hero numerals, eyebrows
+ *   - IBM Plex Mono              → all data, labels, captions
+ *   - IBM Plex Sans              → running body text
+ *
+ * Colour is monochromatic-with-thermal: one warm ink, one phosphor cyan
+ * accent, plus a real thermal gradient (amber→red) for hot-state cues.
+ * Categories collapse to instrumentation tones (heat, phosphor, amber,
+ * steel, graphite) so the page feels like one machine, not a rainbow.
+ *
+ * Tokens here are the only source of truth. Lit shadow DOM inherits via
+ * CSS custom properties — never hardcode a colour or size in a component.
+ * ───────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  /* ── Typography ────────────────────────────────────────────────── */
+  --font-display: "Instrument Serif", "Cormorant Garamond", "Iowan Old Style", Georgia, serif;
+  --font-serif:   "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-sans:    "IBM Plex Sans", "Söhne", "Inter", system-ui, sans-serif;
+  --font-mono:    "IBM Plex Mono", "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+  --font-size-xs:   10.5px;
+  --font-size-sm:   12.5px;
+  --font-size-base: 14px;
+  --font-size-md:   15px;
+  --font-size-lg:   18px;
+  --font-size-xl:   24px;
+  --font-size-2xl:  34px;
+  --font-size-hero: 52px;
+  --font-size-hero-sm: 36px;
+
+  --font-weight-hero:    400;  /* Instrument Serif Regular reads as light */
+  --font-weight-eyebrow: 500;
+
+  /* Letter-spacing scale — wide tracking on small all-caps, none on serif */
+  --track-eyebrow: 0.22em;
+  --track-caption: 0.14em;
+  --track-pill:    0.08em;
+
+  /* ── 8pt grid ──────────────────────────────────────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 16px;
+  --sp-4: 24px;
+  --sp-5: 32px;
+  --sp-6: 48px;
+  --sp-7: 64px;
+
+  /* Soft radii. The instrument language stays mostly rectangular —
+   * radius only on pills and meter caps, never on tile frames. */
+  --radius-sm:   2px;
+  --radius-md:   3px;
+  --radius-lg:   4px;
+  --radius-pill: 1px;
+  --radius-chip: 1px;
+
+  /* ── Ink & paper ───────────────────────────────────────────────── */
+  --ink:        #0a0d12;        /* deepest graphite */
+  --paper:      #11161e;        /* tile ground */
+  --paper-2:    #161c27;        /* recessed shelves */
+  --paper-3:    #1d2532;        /* hover/active wells */
+
+  /* Legacy --surface-N aliases. A few tile components and the test
+   * contract still read these by name; they always trail the paper
+   * tokens, so a theme override of --paper-2 carries through. */
+  --surface-1:  var(--paper);
+  --surface-2:  var(--paper-2);
+  --surface-3:  var(--paper-3);
+
+  /* The page background carries one warm registration glow in the top-
+   * left and a cooler one bottom-right. Subtle — should read as paper
+   * grain under raking light, not a neon aurora. */
+  --bg: var(--ink);
+  --bg-grad:
+    radial-gradient(900px 480px at 8% -4%,  rgba(212, 161,  74, 0.055), transparent 60%),
+    radial-gradient(720px 420px at 92% 105%, rgba(123, 224, 212, 0.035), transparent 60%),
+    var(--ink);
+
+  /* Hairline drafting grid — drawn at body level. 24px module. */
+  --grid-rule:  rgba(230, 221, 196, 0.024);
+  --grid-major: rgba(230, 221, 196, 0.040);
+  --bg-grid:
+    linear-gradient(to right,  var(--grid-rule)  1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(to bottom, var(--grid-rule)  1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(to right,  var(--grid-major) 1px, transparent 1px) 0 0 / 192px 192px,
+    linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px) 0 0 / 192px 192px;
+
+  /* ── Foreground (warm cream, not white) ────────────────────────── */
+  /* Refined 2026-05-12: fg-muted bumped from #8d9aa9 — was reading as
+   * "disabled" instead of "secondary". The new value still sits clearly
+   * below fg-strong on the hierarchy but actually carries information
+   * the user has to read. */
+  --fg:        #e6ddc4;
+  --fg-strong: #f3ecd4;
+  --fg-muted:  #a2afc0;
+  --fg-dim:    #66728a;
+
+  /* ── Rules & seams ─────────────────────────────────────────────── */
+  --border:        rgba(230, 221, 196, 0.10);
+  --border-strong: rgba(230, 221, 196, 0.22);
+  --border-soft:   rgba(230, 221, 196, 0.05);
+  --rule-tick:     rgba(230, 221, 196, 0.34); /* corner registration */
+
+  /* ── Phosphor accent + thermal gradient ────────────────────────── */
+  --accent:      #7be0d4;                       /* CRT cyan readout */
+  --accent-soft: rgba(123, 224, 212, 0.14);
+  --accent-warm: #d4a14a;                       /* amber readout */
+
+  --thermal-cold: #5fb6e0;
+  --thermal-mid:  #d4a14a;
+  --thermal-hot:  #ff6a3d;
+
+  --ok:        #6fcaa9;
+  --ok-soft:   rgba(111, 202, 169, 0.12);
+  --warn:      #e6b25c;
+  --warn-soft: rgba(230, 178, 92, 0.12);
+  --err:       #ff6a3d;
+  --err-soft:  rgba(255, 106, 61, 0.12);
+
+  /* ── Category tones (instrumentation, not rainbow) ─────────────── */
+  --cat-thermal: #ff6a3d;       /* heat   */
+  --cat-cooling: #7be0d4;       /* phosphor flow */
+  --cat-graph:   #d4a14a;       /* amber readout */
+  --cat-events:  #b5c8e8;       /* steel */
+  --cat-system:  #8a8576;       /* graphite */
+
+  /* ── Shadow scale (very restrained — paper, not glass) ─────────── */
+  --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.42);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.55);
+  --shadow-card:
+    0 1px 0 rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.018);
+  --shadow-card-hover:
+    0 18px 44px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --blur-glass: blur(8px) saturate(115%);
+
+  /* ── Motion (mechanical, no spring) ────────────────────────────── */
+  --ease-step: cubic-bezier(0.16, 0.84, 0.44, 1);
+  --ease-out:  cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-lin:  linear;
+  --dur-fast:  120ms;
+  --dur-med:   220ms;
+  --dur-slow:  520ms;
+
+  /* ── Card contract (consumed by _base.js inside tile shadow DOM) ─ */
+  --card-bg: color-mix(in srgb, var(--paper) 92%, transparent);
+  --card-radius: var(--radius-md);
+  --card-padding-x: var(--sp-4);
+  --card-padding-y: calc(var(--sp-4) + 2px);
+  --card-idle-opacity: 0.94;
+  --card-idle-saturate: 0.88;
+  --card-hover-translate: -1px;
+  --card-min-h: 208px;
+
+  --header-h: 76px;
+
+  font-family: var(--font-sans);
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background:
+    var(--bg-grid),
+    var(--bg-grad);
+  background-attachment: fixed, fixed;
+  color: var(--fg);
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--accent-soft); color: var(--fg-strong); }
+
+/* Native scrollbar — tuned to instrument palette */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-dim) 55%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); background-clip: padding-box; }
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * MASTHEAD — engraved instrument nameplate.
+ * Reads like the brass plate at the top of a Tektronix scope:
+ *   wordmark in italic serif, model number small-cap, status indicator
+ *   row, no rounded chrome. A double-rule underline anchors it.
+ * ───────────────────────────────────────────────────────────────────── */
+
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: end;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4) var(--sp-5) var(--sp-2);
+  min-height: var(--header-h);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--ink) 92%, transparent) 0%,
+      color-mix(in srgb, var(--ink) 76%, transparent) 100%);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-bottom: 1px solid var(--border);
+  box-shadow:
+    inset 0 -3px 0 -2px var(--border-strong),  /* second rule */
+    0 1px 0 var(--border-soft);
+  /* Hide-on-scroll-down behaviour (2026-05-13 — operator: «самая
+     главная верхняя шапка слишком жирная и должна скрываться при
+     скролле вниз. при скролле вверх с тяжестью возвращаться»).
+     Body sets data-masthead="hidden" when scroll direction = down;
+     transform off-canvas, cubic-bezier eases like a heavy plate
+     sliding.  Snaps back without delay on the first up-tick. */
+  transition:
+    transform 380ms cubic-bezier(0.16, 0.84, 0.44, 1),
+    box-shadow 240ms ease-out;
+  will-change: transform;
+}
+:root[data-masthead="hidden"] .masthead {
+  transform: translateY(-110%);
+  box-shadow: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .masthead { transition: none; }
+}
+
+/* Corner registration marks — same crosshair language as on tile frames */
+.masthead::before,
+.masthead::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--rule-tick);
+  pointer-events: none;
+}
+.masthead::before {
+  top: var(--sp-2);
+  left: var(--sp-3);
+  border-right: none;
+  border-bottom: none;
+}
+.masthead::after {
+  top: var(--sp-2);
+  right: var(--sp-3);
+  border-left: none;
+  border-bottom: none;
+}
+
+.masthead .glyph {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  color: var(--accent);
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--accent) 28%, transparent));
+  grid-row: 1 / span 2;
+  align-self: center;
+  margin-right: var(--sp-1);
+}
+
+.masthead .wordmark {
+  font-family: var(--font-display);
+  font-size: 38px;
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: -0.005em;
+  line-height: 0.95;
+  margin: 0;
+  color: var(--fg-strong);
+  /* A measured cyan underline-mark, like a pen stroke under a manuscript. */
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.4),
+    0 0 24px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.masthead .wordmark .dot {
+  font-style: normal;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-size: 0.5em;
+  vertical-align: super;
+  margin-left: 4px;
+  letter-spacing: 0;
+  text-shadow: 0 0 16px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.masthead .tagline {
+  display: block;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  font-style: normal;
+  margin-top: 2px;
+}
+
+.masthead-pills {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  border-top: 1px dashed var(--border-soft);
+  padding-top: var(--sp-2);
+}
+
+/* Pills become small rectangular nameplate chips — engraved labels,
+ * not rounded buttons. Status colour shifts only the side-rule and the
+ * value, never the chip body. */
+.pill {
+  height: 22px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--paper-2) 70%, transparent);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--fg-dim);
+  border-radius: var(--radius-chip);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.pill.ok     { color: var(--ok);     border-left-color: var(--ok); }
+.pill.warn   { color: var(--warn);   border-left-color: var(--warn); }
+.pill.err    { color: var(--err);    border-left-color: var(--err);    background: var(--err-soft); }
+.pill.accent { color: var(--accent); border-left-color: var(--accent); }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * HERO NARRATIVE — the journal entry that opens the report.
+ * Sits between masthead and grid. Reads like the abstract of a paper:
+ * a small-caps eyebrow ("LIVE TELEMETRY · REALTIME ML · SOFT HW NUDGES"),
+ * an italic serif claim, then two numbered "layer" cards that look like
+ * marginal notes carved out of the page.
+ * ───────────────────────────────────────────────────────────────────── */
+
+.hero-narrative {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-5) var(--sp-3);
+  display: grid;
+  gap: var(--sp-3);
+  position: relative;
+}
+
+/* A faint left rule, like the gutter of a notebook page. */
+.hero-narrative::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--sp-5) - 12px);
+  top: var(--sp-6);
+  bottom: var(--sp-3);
+  width: 1px;
+  background: var(--border);
+}
+
+.hero-lead {
+  position: relative;
+  padding-left: var(--sp-2);
+}
+
+.hero-eyebrow {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.hero-eyebrow::before {
+  content: "§ ";
+  color: var(--accent);
+  margin-right: 4px;
+}
+
+.hero-claim {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 30px;
+  line-height: 1.32;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--fg);
+  max-width: 880px;
+  letter-spacing: -0.005em;
+}
+.hero-claim strong {
+  font-style: normal;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.62em;
+  color: var(--accent);
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  margin: 0 4px;
+  vertical-align: middle;
+}
+.hero-claim em {
+  font-style: italic;
+  color: var(--fg-strong);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 4px;
+  text-decoration-thickness: 1px;
+}
+
+.hero-layers {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-4);
+}
+
+.hero-layer {
+  position: relative;
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: var(--sp-3);
+  row-gap: var(--sp-1);
+  padding: var(--sp-4) var(--sp-4) var(--sp-4) 0;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border-strong);
+  border-radius: 0;
+  transition: opacity var(--dur-med) var(--ease-out);
+}
+.hero-layer::after {
+  content: "";
+  position: absolute;
+  left: 64px;
+  right: var(--sp-4);
+  bottom: 0;
+  height: 1px;
+  background: var(--border-soft);
+}
+.hero-layer[data-layer="1"] { --layer-color: var(--accent); }
+.hero-layer[data-layer="2"] { --layer-color: var(--cat-graph); }
+.hero-layer[data-layer="3"] { --layer-color: var(--cat-thermal); }
+.hero-layer:hover { opacity: 1; }
+.hero-layer:hover ~ .hero-layer:not(:hover) { opacity: 0.55; }
+
+.hero-layer-no {
+  grid-row: 1 / 3;
+  align-self: start;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 56px;
+  font-weight: 400;
+  line-height: 0.85;
+  color: var(--layer-color);
+  font-variant-numeric: lining-nums;
+  letter-spacing: -0.04em;
+  text-align: right;
+  padding-right: var(--sp-2);
+  border-right: 1px solid var(--border);
+}
+.hero-layer-name {
+  grid-column: 2;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--layer-color);
+}
+.hero-layer-body {
+  grid-column: 2;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--fg);
+}
+.hero-layer-body em { color: var(--fg-strong); font-style: italic; }
+.hero-layer-body strong { color: var(--accent); font-weight: 500; }
+
+.hero-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+  margin: var(--sp-3) 0 0;
+  padding-left: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.hero-tag {
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: var(--radius-chip);
+}
+.hero-link {
+  color: var(--fg-muted);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 1px;
+  transition: color var(--dur-fast), border-color var(--dur-fast);
+}
+.hero-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.hero-sep { opacity: 0.3; }
+
+@media (max-width: 720px) {
+  .hero-narrative { padding: var(--sp-4) var(--sp-3) var(--sp-2); }
+  .hero-narrative::before { display: none; }
+  .hero-claim { font-size: 22px; }
+  .hero-layer { grid-template-columns: 48px 1fr; }
+  .hero-layer-no { font-size: 42px; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * GRID — the journal spread.
+ *   • 320px min lets a 1480 viewport carry 4 columns
+ *   • column-numeral counter feeds each tile's §NN figure caption
+ *   • spotlight dims siblings on hover without shifting the page
+ * ───────────────────────────────────────────────────────────────────── */
+.grid {
+  counter-reset: tile;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5) var(--sp-7);
+  max-width: 1480px;
+  margin: 0 auto;
+}
+.grid > * {
+  align-self: stretch;
+  min-width: 0;
+  counter-increment: tile;
+}
+
+/* Spotlight: dim siblings while one tile is engaged */
+@supports selector(:has(*)) {
+  .spotlight-root:has([data-tile]:hover) [data-tile]:not(:hover),
+  .spotlight-root:has([data-tile]:focus-within) [data-tile]:not(:focus-within) {
+    opacity: 0.42;
+    filter: saturate(0.7);
+    transition: opacity var(--dur-med) var(--ease-out),
+                filter  var(--dur-med) var(--ease-out);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spotlight-root:has([data-tile]:hover) [data-tile]:not(:hover),
+    .spotlight-root:has([data-tile]:focus-within) [data-tile]:not(:focus-within) {
+      filter: none;
+    }
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Legacy .tile / .kv / .empty selectors — kept so any non-Lit fallback
+ * markup and the test suite still see expected class names + keyframes.
+ * ───────────────────────────────────────────────────────────────────── */
+.tile {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  padding: var(--card-padding-y) var(--card-padding-x);
+  box-shadow: var(--shadow-card);
+  animation: card-fade-in var(--dur-slow) var(--ease-out) both;
+}
+.tile h2 {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--fg);
+}
+.kv {
+  display: flex; justify-content: space-between;
+  padding: var(--sp-1) 0;
+  font-size: var(--font-size-sm);
+  border-bottom: 1px dotted var(--border-soft);
+}
+.kv:last-child { border-bottom: none; }
+.kv span { color: var(--fg-muted); }
+.kv strong { color: var(--fg); font-weight: 500; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--fg-muted); font-size: var(--font-size-xs); margin: var(--sp-2) 0 0; font-family: var(--font-mono); }
+.empty {
+  padding: var(--sp-3);
+  color: var(--fg-muted);
+  font-size: var(--font-size-sm);
+  background: color-mix(in srgb, var(--paper-2) 70%, transparent);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border);
+  font-family: var(--font-mono);
+  text-align: center;
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  font-size: var(--font-size-xs);
+}
+.error-strip {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--err);
+  font-size: var(--font-size-sm);
+  background: var(--err-soft);
+  border-left: 2px solid var(--err);
+  margin-top: var(--sp-2);
+  font-family: var(--font-mono);
+}
+.skel {
+  background: linear-gradient(90deg, var(--paper-2), var(--paper-3), var(--paper-2));
+  background-size: 200px 100%;
+  background-repeat: no-repeat;
+  border-radius: var(--radius-sm);
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+  display: inline-block;
+  height: 1em;
+  width: 100%;
+  min-height: 14px;
+}
+
+@keyframes skel-shimmer {
+  0%   { background-position: -200px 0; }
+  100% { background-position: calc(100% + 200px) 0; }
+}
+@keyframes card-fade-in {
+  from { opacity: 0; transform: translateY(6px); clip-path: inset(0 100% 0 0); }
+  to   { opacity: 1; transform: translateY(0);   clip-path: inset(0 0     0 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile, .skel { animation: none !important; }
+}
+
+@media (max-width: 720px) {
+  .masthead {
+    grid-template-columns: auto 1fr;
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  }
+  .grid { padding: var(--sp-3); gap: var(--sp-3); }
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ * THEMES — six finishes of the same instrument.
+ *
+ * Each theme overrides only the colour-token + paper layer + bg gradient.
+ * The structural language (typography hierarchy, registration marks,
+ * journal grid, masthead nameplate) is invariant across themes. The
+ * theme-switcher writes `data-theme="…"` onto <html>; localStorage
+ * persists the choice.
+ *
+ *   graphite  (default) — deep ink + warm cream + phosphor cyan
+ *   amber              — pure black + monochrome amber CRT
+ *   blueprint          — deep navy + drafting cyan + cream
+ *   parchment  (light) — cream paper + bistre brown ink + vermilion
+ *   obsidian           — pure void + ice white + magenta hot
+ *   redline            — charcoal + bone + crimson forensic
+ *
+ * The default tokens (no data-theme attribute) match `graphite`, so the
+ * dashboard renders correctly even before the switcher script attaches.
+ * ═════════════════════════════════════════════════════════════════════ */
+
+/* ── 2 · AMBER (vintage CRT phosphor) ─────────────────────────────── */
+/* Refined 2026-05-12: fg-muted / fg-dim were below 3:1 — bumped warmer
+ * and brighter so secondary labels read. Status colors collapse into the
+ * monochromatic amber scale (intensity = severity); only `err` breaks
+ * monochrome with a hot orange shift, the way a real CRT had only the
+ * one phosphor + an emergency overlay. */
+:root[data-theme="amber"] {
+  color-scheme: dark;
+
+  --ink:     #060400;
+  --paper:   #0e0a05;
+  --paper-2: #1a1109;
+  --paper-3: #261a0d;
+
+  --bg-grad:
+    radial-gradient(1100px 580px at 50% 0%, rgba(255, 168, 51, 0.07), transparent 60%),
+    radial-gradient(720px 420px at 10% 110%, rgba(255, 168, 51, 0.03), transparent 60%),
+    var(--ink);
+
+  --grid-rule:  rgba(255, 168, 51, 0.030);
+  --grid-major: rgba(255, 168, 51, 0.058);
+
+  --fg:        #ffba60;
+  --fg-strong: #ffd9a0;
+  --fg-muted:  #d09250;          /* was #a06f2c — too dim */
+  --fg-dim:    #8a6526;          /* was #5a3c14 — invisible */
+
+  --border:        rgba(255, 168, 51, 0.22);
+  --border-strong: rgba(255, 168, 51, 0.38);
+  --border-soft:   rgba(255, 168, 51, 0.10);
+  --rule-tick:     rgba(255, 168, 51, 0.55);
+
+  --accent:      #ffba60;
+  --accent-soft: rgba(255, 186, 96, 0.20);
+  --accent-warm: #ffd9a0;
+
+  --ok:        #d9e09a;          /* lime-tinted amber so OK reads ≠ accent */
+  --ok-soft:   rgba(217, 224, 154, 0.16);
+  --warn:      #ffba60;
+  --warn-soft: rgba(255, 186, 96, 0.22);
+  --err:       #ff7a45;
+  --err-soft:  rgba(255, 122, 69, 0.22);
+
+  --cat-thermal: #ff7a45;
+  --cat-cooling: #ffba60;
+  --cat-graph:   #ffd9a0;
+  --cat-events:  #d09250;
+  --cat-system:  #a07634;
+
+  --card-bg: color-mix(in srgb, var(--paper) 86%, transparent);
+  --shadow-card:
+    0 1px 0 rgba(0, 0, 0, 0.6),
+    inset 0 0 60px rgba(255, 168, 51, 0.022);  /* faint phosphor glow */
+  --shadow-card-hover:
+    0 18px 44px rgba(0, 0, 0, 0.7),
+    inset 0 0 80px rgba(255, 168, 51, 0.05);
+}
+
+/* ── 3 · BLUEPRINT (deep navy + drafting cyan) ────────────────────── */
+/* Refined 2026-05-12: paper shelves separated more clearly so recess
+ * wells are visible; fg-muted lifted to read at distance over navy.
+ * cat-events shifted off the same cyan as cooling so the two don't
+ * collide on hover spotlights. */
+:root[data-theme="blueprint"] {
+  color-scheme: dark;
+
+  --ink:     #061226;
+  --paper:   #0e2347;
+  --paper-2: #182d55;
+  --paper-3: #233a66;
+
+  --bg-grad:
+    radial-gradient(1200px 600px at 100% 0%,  rgba(120, 195, 255, 0.12), transparent 58%),
+    radial-gradient(800px 460px at 0% 100%,   rgba(255, 230, 180, 0.05), transparent 60%),
+    var(--ink);
+
+  --grid-rule:  rgba(208, 232, 255, 0.050);
+  --grid-major: rgba(208, 232, 255, 0.082);
+
+  --fg:        #dfecff;
+  --fg-strong: #f6fbff;
+  --fg-muted:  #a3c4e3;           /* was #7da4c8 — muddy on navy */
+  --fg-dim:    #5e7fa2;
+
+  --border:        rgba(208, 232, 255, 0.16);
+  --border-strong: rgba(208, 232, 255, 0.32);
+  --border-soft:   rgba(208, 232, 255, 0.08);
+  --rule-tick:     rgba(208, 232, 255, 0.48);
+
+  --accent:      #78c3ff;
+  --accent-soft: rgba(120, 195, 255, 0.20);
+  --accent-warm: #ffd693;
+
+  --ok:        #8be0a8;
+  --ok-soft:   rgba(139, 224, 168, 0.16);
+  --warn:      #ffd693;
+  --warn-soft: rgba(255, 214, 147, 0.18);
+  --err:       #ff8260;
+  --err-soft:  rgba(255, 130, 96, 0.18);
+
+  --cat-thermal: #ffa566;
+  --cat-cooling: #78c3ff;
+  --cat-graph:   #ffd693;
+  --cat-events:  #e8d0a0;        /* warm sand — separates from cooling cyan */
+  --cat-system:  #a3c4e3;
+
+  --card-bg: color-mix(in srgb, var(--paper) 88%, transparent);
+}
+
+/* ── 4 · PARCHMENT (light · technical report) ─────────────────────── */
+/* Refined 2026-05-12: vermilion accent pulled to a darker madder so
+ * it sits on cream paper instead of vibrating. paper-3 lightened a bit
+ * — was reading as "stained patch", now feels like a deliberate
+ * recess. Borders deepened so hairlines render clearly on light bg. */
+:root[data-theme="parchment"] {
+  color-scheme: light;
+
+  --ink:     #f3ead2;
+  --paper:   #ede2c3;
+  --paper-2: #e4d6ae;
+  --paper-3: #dccba2;
+
+  --bg-grad:
+    radial-gradient(1100px 540px at 4% -2%,  rgba(154, 58, 24, 0.08), transparent 60%),
+    radial-gradient(720px 420px at 96% 102%, rgba(82, 60, 40, 0.07), transparent 60%),
+    var(--ink);
+
+  --grid-rule:  rgba(70, 48, 22, 0.058);
+  --grid-major: rgba(70, 48, 22, 0.092);
+
+  --fg:        #2e2110;
+  --fg-strong: #150e06;
+  --fg-muted:  #604829;
+  --fg-dim:    #8a754a;
+
+  --border:        rgba(58, 43, 20, 0.24);
+  --border-strong: rgba(58, 43, 20, 0.44);
+  --border-soft:   rgba(58, 43, 20, 0.13);
+  --rule-tick:     rgba(58, 43, 20, 0.58);
+
+  --accent:      #9a3a18;          /* madder — calmer than full vermilion */
+  --accent-soft: rgba(154, 58, 24, 0.13);
+  --accent-warm: #856515;
+
+  --ok:        #426c2c;
+  --ok-soft:   rgba(66, 108, 44, 0.13);
+  --warn:      #a8701a;
+  --warn-soft: rgba(168, 112, 26, 0.13);
+  --err:       #9a3a18;
+  --err-soft:  rgba(154, 58, 24, 0.13);
+
+  --cat-thermal: #9a3a18;
+  --cat-cooling: #2a5a83;
+  --cat-graph:   #856515;
+  --cat-events:  #426c2c;
+  --cat-system:  #604829;
+
+  --card-bg: color-mix(in srgb, var(--paper) 92%, transparent);
+  --shadow-card:
+    0 1px 0 rgba(58, 43, 20, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  --shadow-card-hover:
+    0 14px 28px rgba(58, 43, 20, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* ── 5 · OBSIDIAN (void · ice · magenta) ──────────────────────────── */
+/* Refined 2026-05-12: ink lifted off pure black (#000 is harsh long-term
+ * + gives no border-light to read crosshairs). Magenta pulled from neon
+ * to a calmer rose so it stops vibrating against the ice fg. Paper
+ * shelves separated more so the recessed mini-cells read. */
+:root[data-theme="obsidian"] {
+  color-scheme: dark;
+
+  --ink:     #080810;
+  --paper:   #0f0f17;
+  --paper-2: #16161f;
+  --paper-3: #1f1f2a;
+
+  --bg-grad:
+    radial-gradient(1000px 540px at 90% -2%,  rgba(227, 74, 160, 0.07), transparent 58%),
+    radial-gradient(820px 460px at 8% 102%,   rgba(124, 200, 255, 0.04), transparent 60%),
+    var(--ink);
+
+  --grid-rule:  rgba(255, 255, 255, 0.030);
+  --grid-major: rgba(255, 255, 255, 0.052);
+
+  --fg:        #f0f2f7;
+  --fg-strong: #ffffff;
+  --fg-muted:  #a4a8b6;          /* was #8e92a0 — bumped for readability */
+  --fg-dim:    #5d606b;
+
+  --border:        rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.28);
+  --border-soft:   rgba(255, 255, 255, 0.06);
+  --rule-tick:     rgba(255, 255, 255, 0.46);
+
+  --accent:      #e34aa0;        /* rose-magenta, not full neon */
+  --accent-soft: rgba(227, 74, 160, 0.18);
+  --accent-warm: #ffc068;
+
+  --ok:        #88dab0;
+  --ok-soft:   rgba(136, 218, 176, 0.16);
+  --warn:      #ffcc5c;
+  --warn-soft: rgba(255, 204, 92, 0.16);
+  --err:       #ff5e5e;
+  --err-soft:  rgba(255, 94, 94, 0.18);
+
+  --cat-thermal: #ff5e5e;
+  --cat-cooling: #e34aa0;
+  --cat-graph:   #ffcc5c;
+  --cat-events:  #88dab0;
+  --cat-system:  #a4a8b6;
+
+  --card-bg: color-mix(in srgb, var(--paper) 92%, transparent);
+}
+
+/* ── 6 · REDLINE (forensic charcoal + bone + crimson) ─────────────── */
+/* Refined 2026-05-12: too much red noise overall — registration
+ * crosshairs are now bone-tinted so only the *accent* carries the
+ * crimson, not the chrome. fg-muted lifted for readability. cat-events
+ * shifted off pure bone (it was identical to fg) — now a soft tan so
+ * categorical sorting reads in actuator-history etc. */
+:root[data-theme="redline"] {
+  color-scheme: dark;
+
+  --ink:     #0e0b0b;
+  --paper:   #181313;
+  --paper-2: #211a1a;
+  --paper-3: #2c2422;
+
+  --bg-grad:
+    radial-gradient(1100px 580px at 0% 0%,    rgba(212, 70, 56, 0.07), transparent 58%),
+    radial-gradient(740px 440px at 100% 100%, rgba(212, 70, 56, 0.030), transparent 60%),
+    var(--ink);
+
+  --grid-rule:  rgba(240, 232, 220, 0.030);
+  --grid-major: rgba(240, 232, 220, 0.052);
+
+  --fg:        #f2eadd;
+  --fg-strong: #fff9ed;
+  --fg-muted:  #b0a193;        /* was #98897a — too dim against charcoal */
+  --fg-dim:    #6e6157;
+
+  --border:        rgba(240, 232, 220, 0.14);
+  --border-strong: rgba(240, 232, 220, 0.30);
+  --border-soft:   rgba(240, 232, 220, 0.07);
+  --rule-tick:     rgba(240, 232, 220, 0.38);   /* bone, NOT crimson */
+
+  --accent:      #d44638;
+  --accent-soft: rgba(212, 70, 56, 0.16);
+  --accent-warm: #e0a060;
+
+  --ok:        #8ab882;
+  --ok-soft:   rgba(138, 184, 130, 0.14);
+  --warn:      #e0a060;
+  --warn-soft: rgba(224, 160, 96, 0.14);
+  --err:       #d44638;
+  --err-soft:  rgba(212, 70, 56, 0.18);
+
+  --cat-thermal: #d44638;
+  --cat-cooling: #e0a060;
+  --cat-graph:   #c79c40;
+  --cat-events:  #c9b6a0;       /* warm tan — separate from fg bone */
+  --cat-system:  #b0a193;
+
+  --card-bg: color-mix(in srgb, var(--paper) 90%, transparent);
+}
+
+/* ── Mode switcher (cool · quiet · off) — operational-mode nameplate ─
+ * Three rectangular chips in a single nameplate strip, sitting in the
+ * masthead pill row. Active chip lights up in the category-thermal /
+ * accent / fg-dim tone respective of the mode's intent. A safety
+ * annotation chip appears next to the strip when quiet-mode is engaged
+ * and the chip is creeping toward the eject ceiling. */
+.mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: var(--sp-1);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  background: color-mix(in srgb, var(--paper-2) 70%, transparent);
+}
+.mode-switcher-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  padding-right: 4px;
+  border-right: 1px solid var(--border);
+  margin-right: 2px;
+}
+.mode-chip {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-chip);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  cursor: pointer;
+  outline: none;
+  transition: color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.mode-chip:hover { color: var(--fg-muted); }
+.mode-chip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.mode-chip-dot {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 0;
+  opacity: 0.45;
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent);
+}
+.mode-chip.is-active .mode-chip-dot {
+  opacity: 1;
+  box-shadow: 0 0 0 1px currentColor, 0 0 8px color-mix(in srgb, currentColor 60%, transparent);
+}
+.mode-chip-cool.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.mode-chip-quiet.is-active {
+  color: var(--cat-graph);
+  border-color: color-mix(in srgb, var(--cat-graph) 55%, transparent);
+  background: color-mix(in srgb, var(--cat-graph) 8%, transparent);
+}
+.mode-chip-off.is-active {
+  color: var(--fg-muted);
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--fg-dim) 10%, transparent);
+}
+.mode-safety {
+  height: 22px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  border: 1px solid;
+  border-radius: var(--radius-chip);
+  margin-left: 2px;
+  white-space: nowrap;
+}
+.mode-safety[data-level="warn"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  background: var(--warn-soft);
+}
+.mode-safety[data-level="eject"] {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 60%, transparent);
+  background: var(--err-soft);
+  animation: mode-safety-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mode-safety-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.65; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mode-safety[data-level="eject"] { animation: none; }
+}
+
+/* ── Theme switcher chip-row in the masthead ─────────────────────── */
+.theme-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: var(--sp-2);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  background: color-mix(in srgb, var(--paper-2) 70%, transparent);
+}
+.theme-switcher-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--track-pill);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  padding-right: 4px;
+  border-right: 1px solid var(--border);
+  margin-right: 2px;
+}
+.theme-swatch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+  position: relative;
+}
+.theme-swatch:hover { transform: scale(1.16); border-color: var(--fg-muted); }
+.theme-swatch[aria-pressed="true"] {
+  border-color: var(--fg-strong);
+  box-shadow: 0 0 0 1px var(--ink), 0 0 0 2px var(--accent);
+}
+/* Swatches are paint chips of each theme's signature pairing. */
+.theme-swatch[data-theme="graphite"]  { background: linear-gradient(135deg, #0a0d12 0% 50%, #7be0d4 50% 100%); }
+.theme-swatch[data-theme="amber"]     { background: linear-gradient(135deg, #050300 0% 50%, #ffb454 50% 100%); }
+.theme-swatch[data-theme="blueprint"] { background: linear-gradient(135deg, #07142a 0% 50%, #69bbff 50% 100%); }
+.theme-swatch[data-theme="parchment"] { background: linear-gradient(135deg, #ebe0c1 0% 50%, #b04518 50% 100%); }
+.theme-swatch[data-theme="obsidian"]  { background: linear-gradient(135deg, #000000 0% 50%, #ff38b2 50% 100%); }
+.theme-swatch[data-theme="redline"]   { background: linear-gradient(135deg, #0d0a0a 0% 50%, #d44638 50% 100%); }

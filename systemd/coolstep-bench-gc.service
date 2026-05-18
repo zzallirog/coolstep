@@ -1,0 +1,25 @@
+[Unit]
+Description=coolstep bench/gc.py — weekly stress-run pruning + index rebuild
+After=default.target
+ConditionPathIsDirectory=%h/coolstep/bench/runs
+
+[Service]
+Type=oneshot
+ExecStart=%h/coolstep/bench/gc.py --keep 50
+StandardOutput=journal
+StandardError=journal
+
+# Resource budget — gc is light (Python stdlib, small file IO)
+MemoryMax=128M
+CPUQuota=20%
+Nice=10
+IOSchedulingClass=idle
+
+# Safety: read-only system outside the bench dir
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/coolstep/bench
+
+[Install]
+WantedBy=default.target
