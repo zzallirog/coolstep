@@ -1,0 +1,39 @@
+pkgbase = coolstep-git
+	pkgdesc = Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard (git/master)
+	pkgver = 0.5.0.r0.gHEAD
+	pkgrel = 1
+	url = https://github.com/zzallirog/coolstep
+	arch = any
+	license = MIT
+	checkdepends = python-pytest
+	checkdepends = python-pytest-cov
+	checkdepends = python-freezegun
+	checkdepends = python-httpx
+	makedepends = git
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-setuptools
+	makedepends = python-wheel
+	depends = python>=3.12
+	depends = python-fastapi
+	depends = uvicorn
+	depends = python-pydantic
+	depends = python-click
+	depends = python-psutil
+	optdepends = asusctl: ASUS TUF/ROG fan curves + AURA actuator
+	optdepends = ryzenadj: AMD STAPM / fast-PPT / slow-PPT actuator
+	optdepends = power-profiles-daemon: laptop power orchestration
+	optdepends = lm_sensors: hwmon driver discovery + fancontrol fallback
+	optdepends = ipmitool: rack server BMC sensor read
+	optdepends = freeipmi: alternative IPMI client
+	optdepends = bpftrace: kernel scheduler events (pre-thermal load signal)
+	optdepends = perf: PMU counters (cycles / instructions / cache-miss)
+	optdepends = nvidia-utils: NVIDIA GPU telemetry via NVML
+	optdepends = python-pynvml: NVIDIA management library Python bindings
+	optdepends = intel-gpu-tools: Intel iGPU monitoring helpers (intel_gpu_top)
+	provides = coolstep=0.5.0.r0.gHEAD
+	conflicts = coolstep
+	source = coolstep::git+https://github.com/zzallirog/coolstep.git
+	sha256sums = SKIP
+
+pkgname = coolstep-git

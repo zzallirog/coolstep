@@ -1,0 +1,167 @@
+{
+  "$schema": "coolstep-manifest-v1",
+  "$version": "1.0",
+  "$generated": "2026-05-12",
+  "$comment": "L0 manifest — ships with coolstep. Do not hand-edit; create custom.json in ~/.config/coolstep/ instead.",
+
+  "hwmon": {
+    "cpu_drivers": [
+      "k10temp", "k8temp", "zenpower", "zenergy",
+      "coretemp",
+      "amd_energy",
+      "cpu_thermal", "soc_thermal"
+    ],
+    "fan_drivers": [
+      "asus", "asus_custom_fan_curve", "asus-ec-sensors", "asus_wmi_sensors",
+      "dell-smm", "dell_smm", "dell_smbios",
+      "applesmc",
+      "thinkpad", "thinkpad_acpi",
+      "nct6683", "nct6687", "nct6775", "nct6776", "nct6779", "nct6791",
+      "nct6792", "nct6793", "nct6795", "nct6796", "nct6797", "nct6798",
+      "it87", "it8665", "it8771", "it8772", "it8786", "it8792", "it8855",
+      "f71808", "f71862fg", "f71869", "f71882fg", "f71889fg",
+      "w83627", "w83627dhg", "w83627ehf", "w83627hf", "w83781d",
+      "gigabyte_wmi",
+      "i915", "xe"
+    ],
+    "storage_drivers": ["nvme", "drivetemp"],
+    "memory_drivers": ["spd5118", "jc42"],
+    "skip_drivers": [
+      "ucsi_source_psy_USBC000:001",
+      "ucsi_source_psy_USBC000:002",
+      "ACAD"
+    ],
+    "superio_prefixes": ["nct6", "it8", "f71", "w83", "asus-ec", "asus_wmi", "gigabyte_wmi"]
+  },
+
+  "gpu_vendors": {
+    "amd": "0x1002",
+    "nvidia": "0x10de",
+    "intel": "0x8086"
+  },
+
+  "distro": {
+    "id_to_clan": {
+      "arch": "arch",
+      "manjaro": "arch",
+      "garuda": "arch",
+      "artix": "arch",
+      "endeavouros": "arch",
+      "ubuntu": "debian",
+      "debian": "debian",
+      "linuxmint": "debian",
+      "pop": "debian",
+      "elementary": "debian",
+      "kali": "debian",
+      "raspbian": "debian",
+      "fedora": "fedora",
+      "rhel": "fedora",
+      "centos": "fedora",
+      "rocky": "fedora",
+      "alma": "fedora",
+      "opensuse-leap": "suse",
+      "opensuse-tumbleweed": "suse",
+      "sles": "suse",
+      "nixos": "nixos"
+    },
+    "clan_pkg_manager": {
+      "arch": "pacman",
+      "debian": "apt",
+      "fedora": "dnf",
+      "suse": "zypper",
+      "nixos": "nix"
+    }
+  },
+
+  "virtualization": {
+    "dmi_hints": [
+      "qemu", "kvm", "vmware", "virtualbox", "xen",
+      "microsoft corporation", "hyper-v",
+      "amazon ec2", "google", "openstack", "bochs"
+    ]
+  },
+
+  "community_pointers": [
+    {
+      "id": "nct6687",
+      "trigger": "MSI/Gigabyte/ASRock superio chip detected but no kernel driver",
+      "reason": "Without nct6687 driver, motherboard fan RPMs are invisible to coolstep",
+      "commands": {
+        "arch": "yay -S nct6687-driver-dkms-git",
+        "debian": "apt install dkms && git clone https://github.com/Fred78290/nct6687d && cd nct6687d && make dkms/install",
+        "fedora": "dnf install dkms kernel-devel && git clone https://github.com/Fred78290/nct6687d && cd nct6687d && make dkms/install",
+        "suse": "zypper install dkms && git clone https://github.com/Fred78290/nct6687d"
+      },
+      "url": "https://github.com/Fred78290/nct6687d"
+    },
+    {
+      "id": "asusctl",
+      "trigger": "ASUS ROG/TUF laptop detected, asusctl absent",
+      "reason": "asusctl exposes fan curves + platform profiles + AURA — coolstep's preferred ASUS actuator",
+      "commands": {
+        "arch": "yay -S asusctl rog-control-center",
+        "debian": "git clone https://gitlab.com/asus-linux/asusctl && cargo build --release  # needs Rust",
+        "fedora": "dnf copr enable lukenukem/asus-linux && dnf install asusctl",
+        "suse": "zypper install asusctl  # may require Packman repo"
+      },
+      "url": "https://gitlab.com/asus-linux/asusctl"
+    },
+    {
+      "id": "ryzenadj",
+      "trigger": "AMD Ryzen detected, ryzenadj absent",
+      "reason": "ryzenadj is the canonical AMD STAPM / fast-PPT / slow-PPT tuner",
+      "commands": {
+        "arch": "yay -S ryzenadj",
+        "debian": "apt install build-essential cmake libpci-dev && git clone https://github.com/FlyGoat/RyzenAdj",
+        "fedora": "dnf install gcc cmake pciutils-devel && git clone https://github.com/FlyGoat/RyzenAdj"
+      },
+      "url": "https://github.com/FlyGoat/RyzenAdj"
+    },
+    {
+      "id": "perf_paranoid",
+      "trigger": "perf_event_paranoid > 2 (PMU counters locked down)",
+      "reason": "Without perf events, coolstep can't read cache-miss / cycles -> no pre-thermal load signal",
+      "commands": {
+        "arch": "echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid  # transient",
+        "debian": "echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-perf.conf && sudo sysctl --system",
+        "fedora": "echo 'kernel.perf_event_paranoid = 2' | sudo tee /etc/sysctl.d/60-perf.conf && sudo sysctl --system"
+      },
+      "url": "https://www.kernel.org/doc/Documentation/sysctl/kernel.txt"
+    },
+    {
+      "id": "rapl_perm",
+      "trigger": "RAPL energy_uj present but root-only (CVE-2020-8694 mitigation)",
+      "reason": "Without RAPL reads, coolstep can't compute actual CPU package power (W)",
+      "commands": {
+        "arch": "Add to systemd unit: AmbientCapabilities=CAP_SYS_ADMIN  (or run as root)",
+        "debian": "Same: AmbientCapabilities=CAP_SYS_ADMIN in coolstep-collector.service",
+        "fedora": "Same -- or `chmod a+r /sys/class/powercap/intel-rapl:0/energy_uj` (not persistent)"
+      },
+      "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-8694"
+    },
+    {
+      "id": "bpftrace",
+      "trigger": "No bpftrace installed -- eBPF sched events unavailable",
+      "reason": "bpftrace gives pre-load detection (10-50 ms earlier than /proc/stat)",
+      "commands": {
+        "arch": "sudo pacman -S bpftrace",
+        "debian": "sudo apt install bpftrace",
+        "fedora": "sudo dnf install bpftrace",
+        "suse": "sudo zypper install bpftrace"
+      },
+      "url": "https://github.com/iovisor/bpftrace"
+    },
+    {
+      "id": "ipmitool_server",
+      "trigger": "Server-class host detected, ipmitool absent",
+      "reason": "Without ipmitool, server fan/inlet/exhaust telemetry is invisible (no BMC access)",
+      "commands": {
+        "arch": "sudo pacman -S ipmitool",
+        "debian": "sudo apt install ipmitool",
+        "fedora": "sudo dnf install ipmitool freeipmi",
+        "suse": "sudo zypper install ipmitool"
+      },
+      "url": "https://github.com/ipmitool/ipmitool"
+    }
+  ]
+}

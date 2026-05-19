@@ -1,0 +1,75 @@
+# Maintainer: zzallirog <github.com/zzallirog>
+pkgname=coolstep
+pkgver=0.5.16
+pkgrel=1
+pkgdesc="Predictive soft-cooling — modular per-host thermal/load orchestrator with live ML dashboard"
+arch=('any')
+url="https://github.com/zzallirog/coolstep"
+license=('MIT')
+
+depends=(
+  'python>=3.12'
+  'python-fastapi'
+  'uvicorn'
+  'python-pydantic'
+  'python-click'
+  'python-psutil'
+)
+
+optdepends=(
+  'asusctl: ASUS TUF/ROG fan curves + AURA actuator'
+  'ryzenadj: AMD STAPM / fast-PPT / slow-PPT actuator'
+  'power-profiles-daemon: laptop power orchestration'
+  'lm_sensors: hwmon driver discovery + fancontrol fallback'
+  'ipmitool: rack server BMC sensor read (server opora)'
+  'bpftrace: kernel scheduler events (pre-thermal load signal)'
+  'perf: PMU counters'
+  'nvidia-utils: NVIDIA GPU telemetry via NVML'
+  'python-pynvml: NVIDIA management library Python bindings'
+  'intel-gpu-tools: Intel iGPU monitoring helpers'
+)
+
+makedepends=(
+  'python-build'
+  'python-installer'
+  'python-setuptools'
+  'python-wheel'
+)
+
+checkdepends=(
+  'python-pytest'
+  'python-pytest-cov'
+  'python-freezegun'
+  'python-httpx'    # fastapi.testclient requirement, used by tests/dashboard/
+)
+
+# Replace with tagged release URL once first stable tag is cut, e.g.:
+#   source=("$pkgname-$pkgver.tar.gz::https://github.com/zzallirog/coolstep/archive/refs/tags/v$pkgver.tar.gz")
+#   sha256sums=('ACTUAL_HASH_HERE')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/zzallirog/coolstep/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  PYTHONDONTWRITEBYTECODE=1 \
+    # Failing tests now fail the build. test_daemon.py is excluded because
+    # chromadb-rust-bindings segfaults on Python 3.14; see docs/troubleshooting.md.
+    PYTHONDONTWRITEBYTECODE=1 python -m pytest --ignore=tests/test_daemon.py -q
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 systemd/coolstep-collector.service "$pkgdir/usr/lib/systemd/user/coolstep-collector.service"
+  install -Dm644 systemd/coolstep-dashboard.service "$pkgdir/usr/lib/systemd/user/coolstep-dashboard.service"
+  install -Dm644 systemd/coolstep-bench-gc.service  "$pkgdir/usr/lib/systemd/user/coolstep-bench-gc.service"
+  install -Dm644 systemd/coolstep-bench-gc.timer    "$pkgdir/usr/lib/systemd/user/coolstep-bench-gc.timer"
+  install -dm755 "$pkgdir/usr/share/coolstep"
+}
