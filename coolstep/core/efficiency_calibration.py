@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from coolstep.core._helpers import canonical_cpu_temp
 from coolstep.core.schema import TelemetryFrame
 
 log = logging.getLogger(__name__)
@@ -91,12 +92,7 @@ def _rotate(path: Path) -> None:
 
 def _tctl(frame: TelemetryFrame) -> float | None:
     # G-9 — vendor-agnostic CPU temp (see store.py:write_frame for full rationale).
-    return (
-        frame.cpu.temps_c.get("tctl")
-        or frame.cpu.temps_c.get("tdie")
-        or frame.cpu.temps_c.get("package")
-        or (max(frame.cpu.temps_c.values()) if frame.cpu.temps_c else None)
-    )
+    return canonical_cpu_temp(frame)
 
 
 def _cpu_power_w(frame: TelemetryFrame) -> float | None:

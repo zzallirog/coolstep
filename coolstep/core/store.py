@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
 
+from coolstep.core._helpers import canonical_cpu_temp
 from coolstep.core.schema import TelemetryFrame
 
 FRAMES_TTL_SEC = 14 * 24 * 3600
@@ -87,12 +88,7 @@ class Store:
         # so an Intel host wrote cpu_temp=NULL to sqlite while temps_c['package']
         # was sitting right there with the real value.  Fallback chain:
         # AMD primary → AMD secondary → Intel package → max-of-cores universal.
-        cpu_temp = (
-            frame.cpu.temps_c.get("tctl")
-            or frame.cpu.temps_c.get("tdie")
-            or frame.cpu.temps_c.get("package")
-            or (max(frame.cpu.temps_c.values()) if frame.cpu.temps_c else None)
-        )
+        cpu_temp = canonical_cpu_temp(frame)
         cpu_power = frame.cpu.power_w.get("package")
         gpu_temp = max((g.temp_c for g in frame.gpus if g.temp_c is not None), default=None)
         gpu_power = max((g.power_w for g in frame.gpus if g.power_w is not None), default=None)

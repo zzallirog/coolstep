@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from coolstep.core.efficiency_calibration import _tctl
 from coolstep.core.schema import CpuMetrics, TelemetryFrame
+from coolstep.inspect.cli import _format_frame_oneline
 
 
 def _frame(temps_c: dict[str, float]) -> TelemetryFrame:
@@ -62,3 +63,10 @@ def test_store_cpu_temp_column_picks_intel_package(tmp_path) -> None:
         "G-9 regression — Store.write_frame() did not pick Intel 'package' "
         f"as cpu_temp shortcut.  Wrote: {row[0]!r}"
     )
+
+
+def test_tail_formatter_picks_intel_package() -> None:
+    """G-10 — `coolstep tail` should use the same Intel fallback chain."""
+    line = _format_frame_oneline(0, _frame({"package": 49.0, "core 0": 48.0}))
+
+    assert "cpu_tctl= 49.0°C" in line
