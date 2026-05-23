@@ -7,8 +7,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.15](https://img.shields.io/badge/release-v0.5.15-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.15)
-[![tests](https://img.shields.io/badge/tests-932_passed-brightgreen)](#tested-against)
+[![v0.5.17](https://img.shields.io/badge/release-v0.5.17-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.17)
+[![tests](https://img.shields.io/badge/tests-913_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 
 <picture>
@@ -377,7 +377,7 @@ non-Debian distros are welcome via
 
 | Phase | Status |
 |---|---|
-| P0 — foundation, four collectors, dashboard | ✅ |
+| P0 — foundation, four collectors, dashboard (now 12 collectors / 6 actuators) | ✅ |
 | P1 — calibration window, throttle FSM, audit closure | ✅ |
 | P2 — actuator stack with sandbox-first defaults | ✅ |
 | P2.5 — perf and ML/control hardening | ✅ |
@@ -408,7 +408,7 @@ non-Debian distros are welcome via
 | [`docs/efficiency-curve.md`](docs/efficiency-curve.md) | `work_per_degree`, the sweet spot, and the knee |
 | [`docs/curve-ownership.md`](docs/curve-ownership.md) | Who manages the fan curve at each layer — BIOS, vendor tool, your profile, coolstep bias — and where coolstep's authority ends |
 | [`docs/drift-detection.md`](docs/drift-detection.md) | Seven indicators that the model has gone stale |
-| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Fifteen ADRs covering why this stack and not another |
+| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Twenty-one ADRs covering why this stack and not another |
 | [`docs/p3-plan.md`](docs/p3-plan.md) | The two-target design and the three-layer manifest |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Every warning `coolstep compat` can print, with per-distro fixes |
 | [`docs/privileges.md`](docs/privileges.md) | What needs root, why, and how to grant the minimum safely |

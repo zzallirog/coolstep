@@ -4,7 +4,7 @@
 > этот файл**, затем перейди в нужный subdir по карте ниже. Не читай весь
 > код — он избыточен. Используй карту.
 
-**Repo version:** 0.5.0 (P2.5 — adaptive curve + incidents + workload profiles + event segmentation, 2026-05-12)
+**Repo version:** 0.5.17 (P2.11 — trajectory features in KNN embedding, 2026-05-18; v0.5.17 — first community contribution release 2026-05-22)
 **Walk protocol:** см. секцию «Self-update protocol» внизу.
 
 > **P2.10 ship-status (2026-05-16):** workload awareness rework — see
