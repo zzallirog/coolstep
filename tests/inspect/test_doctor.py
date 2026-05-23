@@ -17,6 +17,7 @@ from coolstep.inspect.doctor import (
     check_ml_state_fresh,
     check_runtime_state_no_stuck_armed,
     check_store_exists,
+    check_systemd_session,
     run_all,
 )
 
@@ -91,6 +92,78 @@ def test_check_journal_rotation_warn_when_oversize(
 
 
 # ---------------------------------------------------------------------------
+# check_systemd_session — headless probes (XDG, linger, /run/user/$UID/coolstep)
+# ---------------------------------------------------------------------------
+
+
+def test_check_systemd_session_warns_when_xdg_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    result = check_systemd_session()
+    assert result.status == "warn"
+    assert "XDG_RUNTIME_DIR unset" in result.message
+    assert "loginctl enable-linger" in result.message
+
+
+def test_check_systemd_session_warns_when_xdg_dir_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "does-not-exist"))
+    result = check_systemd_session()
+    assert result.status == "warn"
+    assert "directory missing" in result.message
+    assert "loginctl enable-linger" in result.message
+
+
+def test_check_systemd_session_warns_when_linger_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    mock_cp = MagicMock()
+    mock_cp.stdout = b"Linger=no\n"
+    with patch("coolstep.inspect.doctor.subprocess.run", return_value=mock_cp):
+        result = check_systemd_session()
+    assert result.status == "warn"
+    assert "Linger=no" in result.message
+    assert "loginctl enable-linger" in result.message
+
+
+def test_check_systemd_session_ok_when_linger_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    mock_cp = MagicMock()
+    mock_cp.stdout = b"Linger=yes\n"
+    with patch("coolstep.inspect.doctor.subprocess.run", return_value=mock_cp):
+        result = check_systemd_session()
+    assert result.status == "ok"
+    assert "writeable" in result.message
+    # And the hot-state mmap path got created on disk
+    assert (tmp_path / "coolstep").is_dir()
+
+
+def test_check_systemd_session_warns_when_runtime_unwriteable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    # Make hot-dir already exist but read-only — mkdir is fine,
+    # the write_text probe should fail.
+    (tmp_path / "coolstep").mkdir()
+    (tmp_path / "coolstep").chmod(0o500)
+    mock_cp = MagicMock()
+    mock_cp.stdout = b"Linger=yes\n"
+    try:
+        with patch("coolstep.inspect.doctor.subprocess.run", return_value=mock_cp):
+            result = check_systemd_session()
+        assert result.status == "warn"
+        assert "not writeable" in result.message
+    finally:
+        # restore mode so tmp_path can be cleaned
+        (tmp_path / "coolstep").chmod(0o700)
+
+
+# ---------------------------------------------------------------------------
 # check_runtime_state_no_stuck_armed
 # ---------------------------------------------------------------------------
 
@@ -143,9 +216,18 @@ def test_run_all_returns_zero_when_clean(
     # actuator armed = dry-run so baseline check skipped
     monkeypatch.setenv("COOLSTEP_ACTUATOR_ENABLE", "dry-run")
 
-    # Patch systemctl → active; dashboard_api → daemon_seen=true
-    mock_cp = MagicMock()
-    mock_cp.stdout = b"active"
+    # Headless gate: XDG present + writeable; loginctl reports Linger=yes
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+
+    def _fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+        result = MagicMock()
+        if cmd and cmd[0] == "loginctl":
+            result.stdout = b"Linger=yes\n"
+        else:
+            result.stdout = b"active"
+        return result
 
     mock_response = MagicMock()
     mock_response.read.return_value = json.dumps(
@@ -155,7 +237,7 @@ def test_run_all_returns_zero_when_clean(
     mock_response.__exit__ = MagicMock(return_value=False)
 
     with (
-        patch("coolstep.inspect.doctor.subprocess.run", return_value=mock_cp),
+        patch("coolstep.inspect.doctor.subprocess.run", side_effect=_fake_run),
         patch("coolstep.inspect.doctor.urlopen", return_value=mock_response),
     ):
         results, code = run_all()

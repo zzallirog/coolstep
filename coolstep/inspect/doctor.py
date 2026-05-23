@@ -34,6 +34,78 @@ def _coolstep_home() -> Path:
     return Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
 
 
+def _linger_enabled() -> bool | None:
+    """Return True/False/None — None means we couldn't query (no loginctl)."""
+    try:
+        cp = subprocess.run(
+            ["loginctl", "show-user", str(os.getuid()), "--property=Linger"],
+            capture_output=True, timeout=2, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    out = cp.stdout.decode(errors="replace").strip()
+    if "Linger=" not in out:
+        return None
+    return out.split("=", 1)[1].strip().lower() == "yes"
+
+
+def check_systemd_session() -> CheckResult:
+    """Gate that the headless prerequisites for `systemctl --user` are met.
+
+    Runs before unit-state / dashboard-api checks because both depend on
+    a live user manager. Misses surface the actual one-liner fix
+    (loginctl enable-linger + XDG_RUNTIME_DIR export) instead of the
+    cascade of unrelated 'inactive' / 'connection refused' downstream.
+
+    Probes:
+      * XDG_RUNTIME_DIR set + points at an existing directory
+      * Linger flag for the current uid (so the user manager survives logout)
+      * /run/user/$UID/coolstep/ creatable+writeable (hot-state mmap path)
+    """
+    fix = (
+        "  sudo loginctl enable-linger $USER\n"
+        f"  export XDG_RUNTIME_DIR=/run/user/{os.getuid()}"
+    )
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not xdg:
+        return CheckResult(
+            "systemd_session", "warn",
+            f"XDG_RUNTIME_DIR unset — no user manager on this shell; fix:\n{fix}",
+        )
+    runtime_dir = Path(xdg)
+    if not runtime_dir.is_dir():
+        return CheckResult(
+            "systemd_session", "warn",
+            f"XDG_RUNTIME_DIR={xdg} but directory missing; fix:\n{fix}",
+        )
+    linger = _linger_enabled()
+    if linger is False:
+        return CheckResult(
+            "systemd_session", "warn",
+            f"loginctl Linger=no — user manager dies on logout; fix:\n{fix}",
+        )
+    # Hot-state mmap path. Daemon creates this lazily; we attempt to do
+    # the same so an unwriteable runtime_dir (rare but seen on weird
+    # PAM setups) surfaces here instead of via a daemon crash later.
+    hot_dir = runtime_dir / "coolstep"
+    try:
+        hot_dir.mkdir(exist_ok=True)
+        probe = hot_dir / ".doctor-probe"
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as exc:
+        return CheckResult(
+            "systemd_session", "warn",
+            f"{hot_dir} not writeable ({exc.__class__.__name__}: {exc}); "
+            "mmap hot-state will fall back to $TMPDIR",
+        )
+    linger_msg = "linger=on" if linger else "linger=?"
+    return CheckResult(
+        "systemd_session", "ok",
+        f"XDG_RUNTIME_DIR={xdg} · {linger_msg} · {hot_dir} writeable",
+    )
+
+
 def check_store_exists() -> CheckResult:
     p = _coolstep_home() / "store.db"
     if not p.exists():
@@ -150,6 +222,10 @@ def check_journal_rotation_healthy() -> CheckResult:
 
 
 CHECKS = [
+    # systemd_session runs first: if the user manager isn't reachable,
+    # collector_unit/dashboard_unit/dashboard_api will all fail in ways
+    # that hide the real fix (loginctl enable-linger).
+    check_systemd_session,
     check_store_exists,
     check_ml_state_fresh,
     check_collector_unit,
