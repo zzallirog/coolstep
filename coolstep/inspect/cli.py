@@ -106,7 +106,7 @@ def adapters(detailed: bool, as_json: bool) -> None:
 
 
 @main.command()
-@click.option("--ticks", default=10, type=int, help="Number of ticks to print")
+@click.option("-n", "--ticks", default=10, type=int, help="Number of ticks to print")
 @click.option("--period", default=1.0, type=float)
 def tail(ticks: int, period: float) -> None:
     """Live print N consecutive ticks gathered from collectors directly."""
