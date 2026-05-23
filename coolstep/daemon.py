@@ -29,6 +29,7 @@ from typing import Any
 
 import click
 
+from coolstep import __version__
 from coolstep.adapters.actuators import discover as discover_actuators
 from coolstep.adapters.actuators._base import Actuator
 from coolstep.adapters.collectors import discover as discover_collectors
@@ -2090,6 +2091,7 @@ class Daemon:
 
 
 @click.command()
+@click.version_option(version=__version__, prog_name="coolstep-collector")
 @click.option("--period", default=DEFAULT_PERIOD, type=float, help="Sample period (seconds)")
 @click.option("--smoke", is_flag=True, help="Run for max_ticks and exit (smoke test)")
 @click.option("--max-ticks", default=None, type=int, help="Exit after N ticks (default: forever)")

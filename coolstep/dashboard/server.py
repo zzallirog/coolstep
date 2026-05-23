@@ -35,6 +35,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from coolstep import __version__
 from coolstep.adapters.actuators import discover as discover_actuators
 from coolstep.adapters.collectors import discover as discover_collectors
 
@@ -1582,6 +1583,7 @@ def _reload_factory() -> FastAPI:
 
 
 @click.command()
+@click.version_option(version=__version__, prog_name="coolstep-dashboard")
 @click.option("--host", default="127.0.0.1",
               help="Bind interface. Loopback by default. Non-loopback requires --allow-public.")
 @click.option("--port", default=18889, type=int)

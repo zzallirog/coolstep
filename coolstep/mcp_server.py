@@ -13,6 +13,8 @@ from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from coolstep import __version__
+
 BASE_URL = os.environ.get("COOLSTEP_URL", "http://localhost:18889")
 
 server = Server("coolstep")
@@ -149,6 +151,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
 
 def main() -> None:
+    if any(arg in ("--version", "-V") for arg in sys.argv[1:]):
+        print(f"coolstep-mcp, version {__version__}")
+        return
+
     async def _run() -> None:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(
