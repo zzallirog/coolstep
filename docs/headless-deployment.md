@@ -5,6 +5,70 @@
 > below cover the realistic shapes. See [`security.md`](security.md) for
 > the trust model these patterns plug into.
 
+## Install on Debian / Ubuntu (PEP 668)
+
+Debian 12+ and Ubuntu 23.04+ ship `python3` with an `EXTERNALLY-MANAGED`
+marker (PEP 668). The familiar `pip install --user coolstep` recipe
+therefore fails with `error: externally-managed-environment` — both for
+PyPI wheels and `pip install --user git+https://github.com/zzallirog/coolstep.git@v0.5.X`.
+
+Three install paths work on a modern Debian-family host, listed safest
+first:
+
+### 1. `pipx` (recommended)
+
+```
+sudo apt install pipx
+pipx ensurepath        # adds ~/.local/bin to PATH
+pipx install coolstep  # isolated venv per app, idempotent upgrades
+pipx upgrade coolstep
+```
+
+`pipx` creates a dedicated venv for coolstep under `~/.local/share/pipx/venvs/coolstep/`
+and exposes the four scripts (`coolstep`, `coolstep-collector`,
+`coolstep-dashboard`, `coolstep-mcp`) on `PATH`. No system-Python overlap,
+clean uninstall via `pipx uninstall coolstep`. The systemd units in
+`systemd/` ship with `ExecStart=%h/.local/bin/coolstep-…` which already
+resolves to the `pipx` shims — no edits needed.
+
+### 2. Explicit venv
+
+For more control (custom location, extras, dev install):
+
+```
+python3 -m venv ~/.local/coolstep-venv
+~/.local/coolstep-venv/bin/pip install coolstep
+```
+
+Then point systemd units at the venv binaries:
+
+```
+sed -i 's|%h/.local/bin/coolstep|%h/.local/coolstep-venv/bin/coolstep|g' \
+    ~/.config/systemd/user/coolstep-*.service
+systemctl --user daemon-reload
+```
+
+Upgrades: `~/.local/coolstep-venv/bin/pip install --upgrade coolstep`.
+
+### 3. `pip install --break-system-packages` (last resort)
+
+```
+pip install --user --break-system-packages coolstep
+```
+
+This bypasses PEP 668. Use it only when pipx and venv are blocked
+(restricted policy, no `python3-venv` package). Caveats:
+
+- Future `apt upgrade python3` may rearrange `dist-packages` in ways that
+  interact unpredictably with the `--user` install. Re-install if behaviour
+  diverges after a system upgrade.
+- Other tools that probe `pip list` (e.g. Ansible idempotence checks) may
+  see coolstep where the distro packaging layer doesn't expect it.
+
+The same three paths apply on Fedora 41+ (PEP 668 enforced since F40),
+RHEL 10, and most fresh Arch installs that use `pacman` to manage
+`python` itself.
+
 ## Default — loopback
 
 ```
