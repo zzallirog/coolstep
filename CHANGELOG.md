@@ -8,6 +8,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+## [0.5.17] — 2026-05-23
+
+Patch release shipping the first external community contribution.
+
+### Fixed
+
+- **`coolstep tail` showed `cpu_tctl=0.0°C` on Intel hosts** (issue #2, G-10).
+  The G-9 fix from v0.5.2 wired a vendor-neutral CPU temperature fallback
+  (`tctl → tdie → package → max-of-cores`) into the store writer and the
+  efficiency calibrator, but the tail formatter was left with the older
+  `tctl or tdie or 0.0` shortcut. On Intel hosts (no `tctl`/`tdie` exposed,
+  but `package` present) the live tail printed a flat zero while the
+  daemon itself was reading the correct value. Three inlined copies of the
+  fallback have been collapsed into a single helper,
+  `coolstep.core._helpers.canonical_cpu_temp(frame)`, used by all three
+  call sites. Regression covered by
+  `tests/test_cpu_temp_fallback.py::test_tail_formatter_picks_intel_package`.
+
+  Verified end-to-end on Hetzner EX44 / Intel i5-13500 — `coolstep tail`
+  now reports the live `package` temperature instead of `0.0°C`.
+
+  **First external contribution to coolstep** — thanks to
+  [@puneetdixit200](https://github.com/puneetdixit200)
+  (PR #7, closes #2).
+
+### Changed
+
+- **Version bump** — `__version__`, `pyproject.toml`, and AUR `pkgver`
+  are now `0.5.17`. AUR `.SRCINFO` realigned (had been stale at `0.5.5`).
+
 ## [0.5.16] — 2026-05-19
 
 ### Added
