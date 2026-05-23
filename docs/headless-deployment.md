@@ -167,3 +167,32 @@ Every dashboard-triggered mode change is appended to
 and peer info. Read it via `/api/actuator-journal` or
 `coolstep inspect`. When behind a reverse proxy, configure the proxy
 to forward `X-Forwarded-For` so peer identification stays meaningful.
+
+## Storage footprint
+
+Headless hosts under `linger`-enabled `--user` units accumulate
+telemetry without any obvious drift visible to the operator. At the
+default 1 Hz collector (`--period 1.0`) the expected steady state is:
+
+| Component | Size | Notes |
+|---|---|---|
+| `store.db` (frames + raw_json BLOB) | ~1.5–2 GB | 86 400 frames/day × 14d retention × ~1.5 KB raw_json. `rotate()` evicts frames older than `FRAMES_TTL_SEC=14d` (90d for throttle_events / actions). |
+| `data/chroma/` (HNSW index) | ~100–150 MB | Sliding-window reindex from store.db. Rebuildable. |
+| `actuator-journal.jsonl`, `drift-history.jsonl` | KB–MB | Append-only, low volume. |
+| Journal (`journalctl --user -u coolstep-*`) | depends on `SystemMaxUse` | Default systemd journal cap. |
+
+Concrete ground truth from a real deployment — 11 days uptime, 1 Hz
+collector, no actuators armed: 785 864 frames × 1544 B avg raw_json =
+**1.21 GB payload / 1.6 GB physical**. After the first `rotate()` pass
+crosses the 14-day boundary the steady state settles near 1.9 GB.
+
+Per-host knobs:
+
+| Knob | Effect | Default |
+|---|---|---|
+| `COOLSTEP_HOME=/path` | Override data root | `$HOME/coolstep/data` |
+| `coolstep-collector --period N` | Lower sample rate → fewer rows → smaller db. `--period 5.0` cuts the steady state ~5×. | 1.0 |
+
+`raw_json` compression (zstd) and per-period adaptive TTL are future
+work; track in [issues](https://github.com/zzallirog/coolstep/issues)
+if your deployment is disk-tight.
