@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from coolstep.adapters.collectors import discover as discover_collectors
+from coolstep.core._helpers import canonical_cpu_temp
 from coolstep.core.schema import ActionVerb, TelemetryFrame, merge_partial
 
 
@@ -355,7 +356,7 @@ def _parse_window(s: str) -> float:
 
 
 def _format_frame_oneline(idx: int, frame: TelemetryFrame) -> str:
-    tctl = frame.cpu.temps_c.get("tctl") or frame.cpu.temps_c.get("tdie") or 0.0
+    tctl = canonical_cpu_temp(frame) or 0.0
     freq = frame.cpu.freq_mhz[0] if frame.cpu.freq_mhz else 0.0
     fan = max((f.rpm for f in frame.fans if f.rpm is not None), default=0)
     gpu_temps = [g.temp_c for g in frame.gpus if g.temp_c is not None]
