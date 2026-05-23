@@ -31,6 +31,10 @@ data/runtime-state.json
 data/asusctl_fan_curve_baseline.json
 data/telemetry.jsonl
 data/telemetry.jsonl.*
+data/efficiency_table.jsonl
+data/efficiency_table.jsonl.*
+data/residual-state.jsonl
+data/residual-state.jsonl.*
 
 # Belt-and-suspenders: бинарные runtime под data/ нигде не должны commit'иться
 data/**/*.bin
