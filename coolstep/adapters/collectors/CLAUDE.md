@@ -1,24 +1,41 @@
 # CLAUDE.md — `coolstep/adapters/collectors/`
 
-> Sources of telemetry. Каждый файл — один collector. P0 на target: 4 active.
+> Sources of telemetry. Каждый файл — один collector. 12 в репо; реально
+> discoverить — зависит от железа/драйверов.
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.2.0
+**Last synced with master:** 2026-05-23
 **Connectors:**
 - ↑ adapters → `../CLAUDE.md`
 - ↔ peer → `../actuators/CLAUDE.md`
 - ← consumed by → `daemon.py`, `inspect/cli.py:adapters`, `dashboard/server.py:/api/adapters`
 
-## Active collectors (P0)
+## Active collectors
 
-| File | Reads | Status on target | Cost ms | Signals |
-|---|---|---|---|---|
-| `linux_sysfs.py` | hwmon, cpufreq, /proc/stat, platform_state | ✅ | ~18 | 12 |
-| `nvidia_nvml.py` | NVML (через nvidia-ml-py) | ✅ | ~0.05 | 5 |
-| `amdgpu.py` | /sys/class/drm/card*/device/* | ✅ | ~1 | 6 |
-| `hyprctl.py` | subprocess hyprctl clients -j (5s cache) | ✅ | ~0.2 (cached) / ~95 (refresh) | 3 |
+Laptop / desktop / GPU:
 
-Total: **26 discovered signals**. Manifest на `/api/discoveries`.
+| File | Reads | Activates on | Steady cost |
+|---|---|---|---|
+| `linux_sysfs.py` | hwmon, cpufreq, /proc/stat, platform_state | any Linux | ~16-20 ms (1.3× on 14C Intel vs 6C Ryzen) |
+| `nvidia_nvml.py` | NVML via nvidia-ml-py | NVIDIA + drivers | ~0.05 ms |
+| `amdgpu.py` | /sys/class/drm/card*/device/* | AMD dGPU/iGPU | ~1 ms |
+| `intel_i915.py` | /sys/class/drm/card*/i915 GPU busy | Intel iGPU | ~0.1 ms |
+| `hyprctl.py` | subprocess hyprctl clients -j (5s cache) | Hyprland WM | ~0.2 ms cached / ~95 ms refresh |
+| `dbus_session.py` | systemd-logind via DBus | GUI session | ~0 ms |
+
+Server / headless / advanced:
+
+| File | Reads | Activates on | Steady cost |
+|---|---|---|---|
+| `rapl.py` | Intel RAPL `energy_uj` counters | readable msr/powercap | ~0.05 ms |
+| `arm_thermal.py` | /sys/class/thermal на ARM/SBC | ARM/Pi/SBC | ~0.1 ms |
+| `redfish.py` | HTTPS Redfish к BMC | server with BMC URL | depends on net |
+| `ipmi.py` | subprocess `ipmitool sdr` | server with ipmitool | ~50-200 ms |
+| `perf_events.py` | `perf stat -e ...` subprocess | perf user permission | depends |
+| `ebpf_sched.py` | eBPF program over sched_switch | CAP_BPF + kernel | ~0.5 ms |
+
+**12 collectors total.** Live signal count from `/api/discoveries` зависит
+от железа — на target laptop ~25-30, на Intel headless server ~21.
 
 ## Invariants
 

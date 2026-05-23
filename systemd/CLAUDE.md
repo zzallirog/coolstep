@@ -4,7 +4,7 @@
 > под user, не под root).
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Last synced with master:** 2026-05-23
 **Connectors:**
 - ↑ master → `../CLAUDE.md`
 - ← installed by → `Makefile:install-units`
