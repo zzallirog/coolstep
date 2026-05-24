@@ -316,6 +316,26 @@ explicitly set `COOLSTEP_ACTUATOR_ENABLE=true` in the systemd unit
 override — and even then, only after the eight calibration gates
 ([`docs/calibration-gates.md`](docs/calibration-gates.md)) clear.
 
+### CLI subcommands
+
+| Command | Purpose |
+|---|---|
+| `coolstep adapters` | List discovered collectors and actuators |
+| `coolstep tail` | Live-stream telemetry ticks to the terminal |
+| `coolstep stats` | Summary statistics over a time window |
+| `coolstep drift` | Show model-drift indicators |
+| `coolstep efficiency` | Thermal-efficiency report |
+| `coolstep export` | Export telemetry to CSV/JSON |
+| `coolstep doctor` | Full health check (daemon, units, hardware) |
+| `coolstep export-telemetry` | Export raw telemetry frames |
+| `coolstep history` | Decision-history log |
+| `coolstep export-profile` | Export current workload profile |
+| `coolstep import-profile` | Import a saved workload profile |
+| `coolstep compat` | Platform compatibility report |
+| `coolstep install-units` | Write systemd user units (pipx/pip installs) |
+| `coolstep predict-debug` | Inspect predictor buckets and weights |
+| `coolstep predict-replay` | Replay predictions over historical data |
+
 ### Upgrade · Uninstall · Storage footprint
 
 - **Upgrade.** `pipx upgrade coolstep` (Path A) or `pip install --user
