@@ -14,6 +14,8 @@ export class AdaptersHealthTile extends LitElement {
       td:nth-child(2), td:nth-child(3), td:nth-child(4) { text-align: right; }
       .hot  { color: var(--warn); font-weight: 500; }
       .cold { color: var(--ok); }
+      .stale { color: var(--warn); }
+      .empty { color: var(--fg-muted); }
       .verbs { color: var(--fg-muted); font-size: 11px; }
     `,
   ];
@@ -53,6 +55,15 @@ export class AdaptersHealthTile extends LitElement {
     const totalSignals = this.collectors.reduce((s, c) => s + (c.signal_count || 0), 0);
     const totalCostUs = this.collectors.reduce((s, c) => s + (c.sample_us || 0), 0);
     const healthCls = total === 0 ? 'warn' : discovered === total ? 'ok' : 'warn';
+    const nowSec = Date.now() / 1000;
+    const sampleState = (collector) => {
+      if (!collector.last_nonempty_at) return { label: 'no data', cls: 'empty' };
+      if ((nowSec - collector.last_nonempty_at) > 60) return { label: 'stale', cls: 'stale' };
+      return {
+        label: collector.sample_us,
+        cls: collector.sample_us > 10000 ? 'hot' : 'cold',
+      };
+    };
 
     return renderFrame({
       title: 'Adapters health',
@@ -81,14 +92,17 @@ export class AdaptersHealthTile extends LitElement {
             ${this.collectors.length === 0
               ? html`<tr><td colspan="4" class="empty">No collectors registered.</td></tr>`
               : this.collectors.map(
-                  (a) => html`
-                    <tr>
-                      <td>${a.name}</td>
-                      <td>${a.discovered ? '✓' : '—'}</td>
-                      <td class=${a.sample_us > 10000 ? 'hot' : 'cold'}>${a.sample_us}</td>
-                      <td>${a.signal_count ?? '—'}</td>
-                    </tr>
-                  `
+                  (a) => {
+                    const state = sampleState(a);
+                    return html`
+                      <tr>
+                        <td>${a.name}</td>
+                        <td>${a.discovered ? '✓' : '—'}</td>
+                        <td class=${state.cls}>${state.label}</td>
+                        <td>${a.signal_count ?? '—'}</td>
+                      </tr>
+                    `;
+                  }
                 )}
           </tbody>
         </table>
