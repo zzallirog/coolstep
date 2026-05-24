@@ -7,7 +7,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.17](https://img.shields.io/badge/release-v0.5.17-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.17)
+[![v0.5.18](https://img.shields.io/badge/release-v0.5.18-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.18)
 [![tests](https://img.shields.io/badge/tests-913_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 

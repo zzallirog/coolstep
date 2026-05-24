@@ -4,7 +4,7 @@
 > этот файл**, затем перейди в нужный subdir по карте ниже. Не читай весь
 > код — он избыточен. Используй карту.
 
-**Repo version:** 0.5.17 (P2.11 — trajectory features in KNN embedding, 2026-05-18; v0.5.17 — first community contribution release 2026-05-22)
+**Repo version:** 0.5.18 (PR #16 docs + PR #17 `last_nonempty_at` tile observability, 2026-05-24; v0.5.17 — first community contribution release 2026-05-22)
 **Walk protocol:** см. секцию «Self-update protocol» внизу.
 
 > **P2.10 ship-status (2026-05-16):** workload awareness rework — see
