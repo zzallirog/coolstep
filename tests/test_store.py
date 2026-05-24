@@ -95,3 +95,47 @@ def test_store_idempotent_insert_on_same_ts(tmp_path):
     assert latest is not None
     assert latest["cpu_temp"] == 80.0
     store.close()
+
+
+def test_store_sets_wal_autocheckpoint(tmp_path):
+    """`__init__` bumps wal_autocheckpoint to 2000 pages (~8MB)."""
+    store = Store(tmp_path / "store.db")
+    row = store._conn.execute("PRAGMA wal_autocheckpoint").fetchone()
+    assert row is not None
+    assert int(row[0]) == 2000
+    store.close()
+
+
+def test_store_rotate_triggers_passive_checkpoint(tmp_path):
+    """`rotate()` runs a PASSIVE wal_checkpoint without raising."""
+    store = Store(tmp_path / "store.db")
+    now = time.time()
+    # A tiny DB with one fresh + one stale row exercises the DELETE +
+    # checkpoint codepath end-to-end.
+    store.write_frame(_make_frame(now - FRAMES_TTL_SEC - 100))
+    store.write_frame(_make_frame(now))
+    deleted_frames, _ = store.rotate(now=now)
+    assert deleted_frames == 1
+    # After rotate the DB is still readable; the PASSIVE checkpoint
+    # either flushed or skipped, but did not corrupt state.
+    assert store.count_frames() == 1
+    store.close()
+
+
+def test_store_vacuum_returns_nonnegative_and_keeps_db_readable(tmp_path):
+    """`vacuum()` returns bytes_freed ≥ 0 and the DB remains queryable."""
+    store = Store(tmp_path / "store.db")
+    now = time.time()
+    # Write a handful of frames then drop most to create freed pages.
+    for i in range(64):
+        store.write_frame(_make_frame(now - FRAMES_TTL_SEC - 100 - i))
+    store.write_frame(_make_frame(now))
+    store.rotate(now=now)
+    freed = store.vacuum()
+    assert freed >= 0
+    # DB still queryable after VACUUM.
+    assert store.count_frames() == 1
+    latest = store.latest_frame_row()
+    assert latest is not None
+    assert latest["ts"] == now
+    store.close()

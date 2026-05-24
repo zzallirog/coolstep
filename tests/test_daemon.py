@@ -147,6 +147,51 @@ def test_daemon_calls_actuators_when_calibration_off_and_no_predictions(daemon_f
     assert fake_actuator.applied == []
 
 
+def test_dump_ml_state_uses_cached_store_stats_not_live_queries(daemon_factory):
+    """Regression for 2026-05-25 perf fix: `_dump_ml_state` must NOT call
+    `store.count_frames` / `count_throttle_events` / `coverage_seconds`
+    directly — they walk a now-multi-GB sqlite db and cost ~200ms each.
+    The dump path reads pre-computed `_cached_*` fields instead, refreshed
+    every ~30 ticks via `_refresh_store_stats`."""
+    daemon = daemon_factory()
+    # Seed cached values so the snapshot reflects something deterministic
+    # instead of whatever the freshly-empty store would return.
+    daemon._cached_frames_count = 1_790_000
+    daemon._cached_throttle_events_count = 1_600
+    daemon._cached_coverage_seconds = 3600.0 * 24 * 14  # 14 days
+
+    # Replace the three store methods with sentinels that fail the test
+    # if ever invoked from inside `_dump_ml_state`.
+    def _explode(name):
+        def _boom(*_a, **_kw):
+            raise AssertionError(
+                f"{name}() called from hot path — must use cached value"
+            )
+        return _boom
+
+    daemon.store.count_frames = _explode("count_frames")        # type: ignore[method-assign]
+    daemon.store.count_throttle_events = _explode("count_throttle_events")  # type: ignore[method-assign]
+    daemon.store.coverage_seconds = _explode("coverage_seconds")  # type: ignore[method-assign]
+
+    # Build a minimal Prediction-like stub.  `_dump_ml_state` only reads
+    # attributes; it never invokes Prediction methods.
+    class _P:
+        model_name = "test"
+        horizon_sec = 5.0
+        throttle_prob = 0.0
+        expected_temp_c = 60.0
+        confidence = 1.0
+        neighbours = None
+
+    daemon._dump_ml_state(_P(), {})
+
+    import json
+    snap = json.loads(Path(daemon.ml_state_path).read_text())
+    assert snap["frames_in_store"] == 1_790_000
+    assert snap["throttle_events_in_store"] == 1_600
+    assert snap["coverage_seconds"] == 3600.0 * 24 * 14
+
+
 # Balance-plan step I: self-monitor surface in ml-state.json.
 
 def test_daemon_self_monitor_busy_ratio_in_snapshot(daemon_factory):

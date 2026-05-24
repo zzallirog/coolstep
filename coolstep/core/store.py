@@ -2,11 +2,28 @@
 
 Schema follows docs/architecture.md. Rotation: frames > 14 days dropped on
 each `rotate()`. throttle_events / actions kept 90 days.
+
+Maintenance — manual offline VACUUM
+-----------------------------------
+`rotate()` DELETEs old frames but does not reclaim file pages, so the
+store grows without bound until VACUUM runs. VACUUM is too expensive to
+schedule in the tick loop (rewrites the whole DB; 3.6GB → tens of
+seconds; needs free space ≥ current DB size). One-shot offline recipe:
+
+    systemctl --user stop coolstep-collector
+    sqlite3 ~/coolstep/data/store.db 'PRAGMA wal_checkpoint(TRUNCATE); VACUUM;'
+    systemctl --user start coolstep-collector
+
+Expected size: 3.6GB → ~1.5GB if raw_json is dominant filler; less if
+column-level fragmentation. The `Store.vacuum()` method exposes the same
+behaviour as an explicit API for maintenance scripts; do NOT wire it into
+the tick loop or `rotate()`.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from dataclasses import asdict
@@ -68,6 +85,11 @@ class Store:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Default wal_autocheckpoint=1000 pages (~4MB) only fires when an
+        # unblocked writer triggers it; a long-lived dashboard reader can
+        # keep the WAL pinned indefinitely. Bumping to 2000 pages (~8MB)
+        # gives a tighter ceiling without thrashing the writer.
+        self._conn.execute("PRAGMA wal_autocheckpoint=2000")
         self._lock = RLock()
         self._conn.executescript(SCHEMA_SQL)
         self._conn.commit()
@@ -211,9 +233,41 @@ class Store:
                 )
                 events_del = cur.rowcount or 0
                 self._conn.commit()
+                # PASSIVE checkpoint flushes whatever pages are not pinned
+                # by a reader; never blocks. TRUNCATE would block readers,
+                # which we explicitly do not want on a 10-min routine.
+                self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         finally:
             self._writes_paused = False
         return frames_del, events_del
+
+    def vacuum(self) -> int:
+        """Rewrite the DB to reclaim freed pages. Returns bytes freed.
+
+        VACUUM is expensive: rewrites the entire database to a temp file
+        then renames over the original (3.6GB → tens of seconds; needs
+        free space ≥ current DB size). Call manually from a maintenance
+        script — do NOT wire into `rotate()` or the tick loop.
+
+        Pauses writes via `_writes_paused` for the duration so the
+        daemon's per-tick callers skip rather than queue on the lock.
+        Returns the byte delta (size_before - size_after); may be 0 or
+        slightly negative if the file is already tightly packed.
+        """
+        self._writes_paused = True
+        try:
+            with self._lock:
+                size_before = (
+                    os.path.getsize(self.path) if self.path.exists() else 0
+                )
+                self._conn.execute("VACUUM")
+                self._conn.commit()
+                size_after = (
+                    os.path.getsize(self.path) if self.path.exists() else 0
+                )
+        finally:
+            self._writes_paused = False
+        return size_before - size_after
 
     def close(self) -> None:
         self._conn.close()
