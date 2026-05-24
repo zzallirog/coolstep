@@ -4,7 +4,7 @@
 > плюс новый pillar `tests/compat/` (hw matrix + interference scenarios).
 
 **Module version:** 0.2.0
-**Last synced with master:** 2026-05-23
+**Last synced with master:** 2026-05-24
 **Connectors:**
 - ↑ master → `../CLAUDE.md`
 - → tests → весь `coolstep/` package

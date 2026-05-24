@@ -3,7 +3,7 @@
 > FastAPI бэкенд + frontend artifacts. Default port :18889 (атриум-стиль).
 
 **Module version:** 0.2.0
-**Last synced with master:** 2026-05-23
+**Last synced with master:** 2026-05-24
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - → reads from → `core/store.py`, `core/calibration.py`, `adapters/collectors/`

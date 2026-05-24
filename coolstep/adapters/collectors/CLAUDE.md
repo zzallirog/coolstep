@@ -4,7 +4,7 @@
 > discoverить — зависит от железа/драйверов.
 
 **Module version:** 0.2.0
-**Last synced with master:** 2026-05-23
+**Last synced with master:** 2026-05-24
 **Connectors:**
 - ↑ adapters → `../CLAUDE.md`
 - ↔ peer → `../actuators/CLAUDE.md`
