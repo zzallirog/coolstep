@@ -17,6 +17,10 @@ data/exports/
 data/chroma/
 data/chroma.bak*/
 
+# HNSW standalone index + embedder stats — runtime, persisted by daemon, regenerable
+data/hnsw/
+data/embedder-stats.json
+
 # ML state / training history
 data/ml-state.json
 data/drift-history.jsonl
