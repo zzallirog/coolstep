@@ -12,7 +12,6 @@ from urllib.error import URLError
 import pytest
 
 from coolstep.inspect.doctor import (
-    CheckResult,
     check_journal_rotation_healthy,
     check_ml_state_fresh,
     check_runtime_state_no_stuck_armed,
@@ -248,7 +247,7 @@ def test_run_all_returns_zero_when_clean(
 def test_run_all_returns_two_on_fail(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    home = _set_home(monkeypatch, tmp_path)
+    _set_home(monkeypatch, tmp_path)
     # store.db absent → check_store_exists = fail
     # ml-state.json absent → check_ml_state_fresh = fail
 

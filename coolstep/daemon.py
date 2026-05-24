@@ -17,6 +17,7 @@ Designed to run as user-systemd unit. Catches SIGTERM, flushes store, exits 0.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -141,7 +142,7 @@ def _coolstep_home() -> Path:
     return Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
 
 
-def _log_backfill_exception(task: "asyncio.Task[Any]") -> None:
+def _log_backfill_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -149,7 +150,7 @@ def _log_backfill_exception(task: "asyncio.Task[Any]") -> None:
         log.debug("incremental backfill failed: %r", exc)
 
 
-def _log_spike_incident_exception(task: "asyncio.Task[Any]") -> None:
+def _log_spike_incident_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -157,7 +158,7 @@ def _log_spike_incident_exception(task: "asyncio.Task[Any]") -> None:
         log.debug("spike incident write failed: %r", exc)
 
 
-def _log_rotate_exception(task: "asyncio.Task[Any]") -> None:
+def _log_rotate_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -165,7 +166,7 @@ def _log_rotate_exception(task: "asyncio.Task[Any]") -> None:
         log.warning("store rotate failed: %r", exc)
 
 
-def _log_chroma_guard_exception(task: "asyncio.Task[Any]") -> None:
+def _log_chroma_guard_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -447,10 +448,8 @@ class Daemon:
                     break
                 elapsed = time.monotonic() - t0
                 sleep_for = max(0.0, self.period - elapsed)
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
-                except TimeoutError:
-                    pass
         finally:
             self._revert_all_armed("shutdown")
             self._persist_runtime_state()
@@ -1926,7 +1925,7 @@ class Daemon:
             f for f in self._labelled_window if f.timestamp >= cutoff
         ]
 
-    def _on_backfill_labels_done(self, task: "asyncio.Task[Any]") -> None:
+    def _on_backfill_labels_done(self, task: asyncio.Task[Any]) -> None:
         if task.cancelled():
             return
         try:

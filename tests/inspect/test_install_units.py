@@ -25,7 +25,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ---------------------------------------------------------------- G-5 guard
 
 def test_install_units_creates_data_dir(isolated_home: Path) -> None:
-    from coolstep.inspect.install_units import install, _data_dir
+    from coolstep.inspect.install_units import _data_dir, install
 
     assert not _data_dir().exists(), "precondition: data dir absent"
     results = install(force=True)
@@ -40,7 +40,7 @@ def test_install_units_creates_data_dir(isolated_home: Path) -> None:
 
 
 def test_install_units_idempotent_on_data_dir(isolated_home: Path) -> None:
-    from coolstep.inspect.install_units import install, _data_dir
+    from coolstep.inspect.install_units import _data_dir, install
 
     _data_dir().mkdir(parents=True)
     results = install(force=True)

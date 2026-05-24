@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import threading
-import time
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from coolstep.adapters.collectors.perf_events import PerfEventsCollector
-
 
 _SAMPLE_PERF_LINES = [
     # ts, value, unit, event, run_ns, run_pct

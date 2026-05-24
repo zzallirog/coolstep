@@ -10,7 +10,6 @@ This replaces a 12-VM lab — same coverage, runs in <1s, lands in CI.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 

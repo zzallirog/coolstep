@@ -17,10 +17,10 @@ just-after-boot states.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Profile(str, Enum):
+class Profile(StrEnum):
     CODE = "code"
     RENDER = "render"
     GAME = "game"

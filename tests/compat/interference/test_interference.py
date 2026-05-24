@@ -41,13 +41,12 @@ def test_scenario(scenario, tmp_path: Path, monkeypatch):
     # Apply scenario-level env on top of snapshot env
     snap = apply_overlay(snap, {"env": {**snap.env, **scenario.env}})
 
-    with fake_platform(snap, tmp_path):
-        with fake_actors(
-            scenario.other_actors,
-            asusctl_version=snap.asusctl_version or "6.1.2",
-        ):
-            caps = detect_caps()
-            outcome = _probe_outcome(caps, scenario)
+    with fake_platform(snap, tmp_path), fake_actors(
+        scenario.other_actors,
+        asusctl_version=snap.asusctl_version or "6.1.2",
+    ):
+        caps = detect_caps()
+        outcome = _probe_outcome(caps, scenario)
 
     _assert_outcome(outcome, scenario)
 
@@ -61,6 +60,7 @@ def _probe_outcome(caps, scenario) -> dict:
     # epp_shift
     try:
         from coolstep.adapters.actuators import epp_shift as _epp
+
         # Force its caps view via singleton
         from coolstep.compat import reset_caps as _rc
         _rc(caps)
@@ -109,7 +109,6 @@ def _probe_outcome(caps, scenario) -> dict:
 def _assert_outcome(outcome, scenario):
     caps = outcome["caps"]
     plan = outcome.get("plan")
-    exp = scenario.expected
 
     failures: list[str] = []
 

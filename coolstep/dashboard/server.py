@@ -27,7 +27,7 @@ import re
 import sqlite3
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import click
@@ -215,7 +215,7 @@ def _trim_now() -> dict[str, object]:
 
 def _read_rss_kb() -> int | None:
     try:
-        with open("/proc/self/status", "r") as f:
+        with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1])
@@ -243,10 +243,8 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
-        try:
+        with suppress(BaseException):
             await task
-        except BaseException:
-            pass
 
 
 def create_app(
@@ -312,10 +310,8 @@ def create_app(
                 "fan_max_rpm", "workload_label", "raw_json")
         body = dict(zip(cols, row, strict=True))
         if isinstance(body["raw_json"], str):
-            try:
+            with suppress(json.JSONDecodeError):
                 body["raw"] = json.loads(body["raw_json"])
-            except json.JSONDecodeError:
-                pass
         body.pop("raw_json", None)
         return JSONResponse(body)
 
@@ -420,8 +416,8 @@ def create_app(
         # `gc.collect()` after the build returns the parsed-row temporaries
         # to the freelist immediately instead of waiting for generation-2
         # collection (which under MemoryHigh-throttle never gets to run).
-        from dataclasses import asdict
         import gc
+        from dataclasses import asdict
 
         cached, put = _cached_endpoint(f"efficiency:{since}", 300.0)
         if cached is not None:

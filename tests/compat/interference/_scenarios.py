@@ -20,11 +20,10 @@ Why we patch subprocess.run globally here (not in fake_platform):
 """
 from __future__ import annotations
 
-import shutil
-import subprocess
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 from unittest.mock import patch
 
 

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from coolstep.adapters.collectors.ipmi import IpmiCollector, _parse_sensor_output
-
 
 _SAMPLE_OUTPUT = """\
 CPU1 Temp        | 52.000     | degrees C  | ok    | 0.000     | 0.000     | 0.000     | 95.000    | 97.000    | 99.000

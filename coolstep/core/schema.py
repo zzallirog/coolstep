@@ -6,7 +6,7 @@ Adapters fill *partial* fields; the daemon merges per-tick. Strict mypy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 # Lookahead label for `was_hot_in_30s`. Backfilled once `now - lookahead > ts`;
 # until then frames carry LABEL_UNKNOWN and KNN/where-filters skip them.
@@ -102,7 +102,7 @@ class SignalDescriptor:
     requires: tuple[str, ...] = ()  # external deps: kernel module, command, env
 
 
-class ActionVerb(str, Enum):
+class ActionVerb(StrEnum):
     RAMP_COOLING = "ramp_cooling"
     CAP_BOOST = "cap_boost"
     SHIFT_POWER_ENVELOPE = "shift_power_envelope"

@@ -250,6 +250,4 @@ class EventSegmenter:
         # a temperature plateau — refuse to fold.
         if len(temps) != len(self._window):
             return False
-        if max(temps) - min(temps) > self._plateau_temp_tol:
-            return False
-        return True
+        return not max(temps) - min(temps) > self._plateau_temp_tol

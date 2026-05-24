@@ -199,10 +199,7 @@ def _hyprland_socket_exists() -> bool:
     hypr_dir = Path(f"/run/user/{uid}/hypr")
     if not hypr_dir.is_dir():
         return False
-    for sig_dir in hypr_dir.iterdir():
-        if (sig_dir / ".socket.sock").exists():
-            return True
-    return False
+    return any((sig_dir / ".socket.sock").exists() for sig_dir in hypr_dir.iterdir())
 
 
 def _asusctl_version() -> tuple[str, bool]:
@@ -399,7 +396,7 @@ def detect_caps(
 
     # systemd user
     systemd_ok = bool(shutil.which("systemctl"))
-    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    os.environ.get("XDG_RUNTIME_DIR", "")
     unit_dir = str(Path.home() / ".config" / "systemd" / "user") if systemd_ok else ""
 
     superio = _detect_superio(hwmon_names)
