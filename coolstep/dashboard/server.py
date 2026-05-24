@@ -27,7 +27,7 @@ import re
 import sqlite3
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import click
@@ -43,6 +43,7 @@ from coolstep.adapters.collectors import discover as discover_collectors
 # cache for slightly less than that to stay fresh without re-paying the cost.
 _ADAPTERS_CACHE_SEC = 25.0
 _adapters_cache: dict[str, object] = {"ts": 0.0, "body": None}
+_collector_last_nonempty_at: dict[str, float] = {}
 
 # /api/calibration runs 5 full-scan sqlite queries on frames table
 # (118k+ rows): COUNT, MAX(cpu_temp), 2× filtered COUNT, COUNT DISTINCT.
@@ -101,6 +102,7 @@ def _reset_endpoint_caches() -> None:
     _GENERIC_CACHES.clear()
     _adapters_cache["ts"] = 0.0
     _adapters_cache["body"] = None
+    _collector_last_nonempty_at.clear()
     _calibration_cache["ts"] = 0.0
     _calibration_cache["body"] = None
     _discoveries_cache["ts"] = 0.0
@@ -379,15 +381,17 @@ def create_app(
         collectors = discover_collectors()
         col_result = []
         for c in collectors:
-            try:
-                c.sample()
-            except Exception:  # noqa: BLE001
-                pass
+            sample = {}
+            with suppress(Exception):
+                sample = c.sample()
+            if sample:
+                _collector_last_nonempty_at[c.name] = time.time()
             cost = c.cost()
             col_result.append({
                 "name": c.name,
                 "discovered": True,
                 "sample_us": cost.sample_us,
+                "last_nonempty_at": _collector_last_nonempty_at.get(c.name),
                 "rss_kb": cost.rss_kb,
                 "signal_count": len(c.signals()) if hasattr(c, "signals") else 0,
             })
@@ -834,7 +838,7 @@ def create_app(
         path = _stack_decisions_path()
         if not path.exists():
             return JSONResponse({"adrs": []})
-        return JSONResponse({"adrs": _parse_adrs(path.read_text())})
+        return JSONResponse({"adrs": _parse_adrs(path.read_text(encoding="utf-8"))})
 
     @app.get("/api/actuator-journal")
     async def actuator_journal(limit: int = 50) -> JSONResponse:

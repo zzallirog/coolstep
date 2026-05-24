@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from coolstep.core.schema import (
+    Cost,
     CpuMetrics,
     FanMetrics,
     GpuMetrics,
@@ -70,6 +71,67 @@ def test_adapters_returns_list(client):
     assert r.status_code == 200
     body = r.json()
     assert "collectors" in body
+
+
+def test_adapters_marks_collectors_without_nonempty_sample(client, monkeypatch):
+    class EmptyCollector:
+        name = "empty_collector"
+
+        def discover(self):
+            return True
+
+        def sample(self):
+            return {}
+
+        def cost(self):
+            return Cost(sample_us=0, rss_kb=0)
+
+        def signals(self):
+            return []
+
+    monkeypatch.setattr(
+        "coolstep.dashboard.server.discover_collectors",
+        lambda: [EmptyCollector()],
+    )
+
+    r = client.get("/api/adapters")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["collectors"][0]["name"] == "empty_collector"
+    assert body["collectors"][0]["sample_us"] == 0
+    assert body["collectors"][0]["last_nonempty_at"] is None
+
+
+def test_adapters_records_last_nonempty_sample_time(client, monkeypatch):
+    class NonemptyCollector:
+        name = "nonempty_collector"
+
+        def discover(self):
+            return True
+
+        def sample(self):
+            return {"cpu": {"temps_c": {"tctl": 55.0}}}
+
+        def cost(self):
+            return Cost(sample_us=123, rss_kb=0)
+
+        def signals(self):
+            return []
+
+    monkeypatch.setattr(
+        "coolstep.dashboard.server.discover_collectors",
+        lambda: [NonemptyCollector()],
+    )
+    monkeypatch.setattr("coolstep.dashboard.server.time.time", lambda: 12345.0)
+
+    r = client.get("/api/adapters")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["collectors"][0]["name"] == "nonempty_collector"
+    assert body["collectors"][0]["sample_us"] == 123
+    assert body["collectors"][0]["last_nonempty_at"] == 12345.0
 
 
 def test_stack_rationale_parses(client):
