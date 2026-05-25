@@ -80,6 +80,18 @@ _discoveries_cache: dict[str, object] = {"ts": 0.0, "body": None}
 # offload makes the worker non-blocking, which is the whole fix.
 _GENERIC_CACHES: dict[str, dict[str, object]] = {}
 
+# Per-key async locks — prevents concurrent cache-miss "thundering herd" on
+# expensive endpoints. /api/efficiency was burning 300-600MB RSS per concurrent
+# miss (20k rows × json.loads × N callers) — R2-C 10min mem probe nailed it.
+_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
+
+def _cache_lock(key: str) -> asyncio.Lock:
+    lock = _CACHE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CACHE_LOCKS[key] = lock
+    return lock
+
 # Per-route latency ring: 60 samples per route. Written by middleware on the
 # event loop (single writer), read by /api/self-monitor (single reader).
 # collections.deque is thread-safe for append+popleft, but we're single-loop
@@ -369,17 +381,25 @@ async def _lifespan(app: FastAPI):
     # against an idle loop. Calibration is NOT pre-warmed: cold-miss is
     # 16s on 300k+ frame store, ships even more GIL pressure than is worth
     # the one-cache-miss-per-30s payoff.
+    async def _warm_calibration_locked():
+        # Acquire the same lock /api/calibration uses, so warm + first user
+        # request don't both compute. First holder wins; the other becomes a
+        # cache-hit returnee.
+        async with _cache_lock("calibration"):
+            now = time.monotonic()
+            cached = _calibration_cache.get("body")
+            if cached is not None and (now - float(_calibration_cache["ts"])) < _CALIBRATION_CACHE_SEC:
+                return  # someone else warmed it already
+            await asyncio.to_thread(_warm_calibration_cache)
+
     async def _delayed_prewarm():
         await asyncio.sleep(2.0)
+        # All warms fire in parallel; calibration via lock-gated wrapper so
+        # warm thread + first user request don't duplicate the 16-30s compute.
         asyncio.create_task(asyncio.to_thread(_warm_imports))
         asyncio.create_task(asyncio.to_thread(_warm_adapters_cache))
         asyncio.create_task(asyncio.to_thread(_warm_discoveries_cache))
-        # Calibration warmed AFTER the cheap warms — it's the 16s SQLite scan,
-        # but skipping it means the first calibration-state-tile fetch eats 16s
-        # cold-miss (loading skeleton hides it, but TTL=30s means most users
-        # still pay it once). 10s delay = uvicorn fully responsive first.
-        await asyncio.sleep(8.0)
-        asyncio.create_task(asyncio.to_thread(_warm_calibration_cache))
+        asyncio.create_task(_warm_calibration_locked())
     prewarm_task = asyncio.create_task(_delayed_prewarm())
     try:
         yield
@@ -453,23 +473,24 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         def _work() -> dict:
             store_p = _store_path()
             state_p = _ml_state_path()
-            # daemon_seen via mtime, not bare exists() — store.db lingers
-            # forever after collector dies; exists() lied "green" for 60s+
-            # while daemon was dead. Liveness = store written within 15s.
-            store_fresh = False
-            if store_p.exists():
+            # daemon_seen via ml-state.json mtime (written every tick, ~1Hz).
+            # store.db is WAL-mode — main file mtime only bumps on checkpoint
+            # (every 10 min via rotate); WAL file gets the per-tick writes.
+            # Earlier `store_p.exists()` check lied "green" for 60s+ when
+            # daemon was dead. ml_state_age <= 15s = live daemon.
+            ml_age = None
+            if state_p.exists():
                 try:
-                    store_fresh = (time.time() - store_p.stat().st_mtime) <= 15.0
+                    ml_age = time.time() - state_p.stat().st_mtime
                 except OSError:
                     pass
+            daemon_live = ml_age is not None and ml_age <= 15.0
             return {
-                "daemon_seen": store_fresh,
+                "daemon_seen": daemon_live,
                 "store_path": str(store_p),
                 "store_size_bytes": store_p.stat().st_size if store_p.exists() else 0,
                 "ml_state_seen": state_p.exists(),
-                "ml_state_age_sec": (
-                    time.time() - state_p.stat().st_mtime if state_p.exists() else None
-                ),
+                "ml_state_age_sec": ml_age,
             }
 
         body = await asyncio.to_thread(_work)
@@ -561,21 +582,25 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         cached = _calibration_cache.get("body")
         if cached is not None and (now - float(_calibration_cache["ts"])) < _CALIBRATION_CACHE_SEC:
             return JSONResponse(cached)  # type: ignore[arg-type]
-        from coolstep.core.calibration import evaluate
 
-        # The 5 full-scan sqlite queries inside evaluate() are CPU-bound under
-        # the dashboard's CPUQuota — running them on the FastAPI event loop
-        # blocks every other endpoint for ~1s (cockpit polls queue up,
-        # operator sees uneven hangs).  Offload to a worker thread so other
-        # tiles keep responding while calibration recomputes.
-        report = await asyncio.to_thread(evaluate, _store_path())
-        body = report.to_dict()
-        # frontend ожидает gates как dict — переформатируем под существующий dashboard.js
-        gates_dict = {g["name"]: g for g in body["gates"]}  # type: ignore[index]
-        body["gates"] = gates_dict
-        _calibration_cache["ts"] = now
-        _calibration_cache["body"] = body
-        return JSONResponse(body)
+        # Stampede lock: cold-miss runs 5 full-table scans on 300k+ frame
+        # store, costs 16-30s wall + 400MB working set. Without lock N
+        # concurrent first-hits = N× compute. With lock: first computes,
+        # rest wait + serve from cache.
+        async with _cache_lock("calibration"):
+            now = time.monotonic()
+            cached = _calibration_cache.get("body")
+            if cached is not None and (now - float(_calibration_cache["ts"])) < _CALIBRATION_CACHE_SEC:
+                return JSONResponse(cached)  # type: ignore[arg-type]
+
+            from coolstep.core.calibration import evaluate
+            report = await asyncio.to_thread(evaluate, _store_path())
+            body = report.to_dict()
+            gates_dict = {g["name"]: g for g in body["gates"]}  # type: ignore[index]
+            body["gates"] = gates_dict
+            _calibration_cache["ts"] = now
+            _calibration_cache["body"] = body
+            return JSONResponse(body)
 
     @app.get("/api/adapters")
     async def adapters() -> JSONResponse:
@@ -634,28 +659,39 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         import gc
         from dataclasses import asdict
 
-        cached, put = _cached_endpoint(f"efficiency:{since}", 300.0)
+        cache_key = f"efficiency:{since}"
+        cached, put = _cached_endpoint(cache_key, 300.0)
         if cached is not None:
             return JSONResponse(cached)  # type: ignore[arg-type]
 
-        from coolstep.core.efficiency import compute_historical
+        # R2-C fix: lock-gated cache miss to prevent thundering herd. N tabs
+        # opening simultaneously used to fire N concurrent compute_historical
+        # calls (each 20k rows × json.loads → ~400MB working set). RSS burst
+        # 150MB → 2.5GB. With lock: first caller computes, others wait + hit
+        # the freshly-populated cache. One compute per 300s window total.
+        async with _cache_lock(cache_key):
+            cached2, _ = _cached_endpoint(cache_key, 300.0)
+            if cached2 is not None:
+                return JSONResponse(cached2)  # type: ignore[arg-type]
 
-        def _work() -> dict:
-            report = compute_historical(_store_path(), since_seconds=_parse_window(since))
-            out = {
-                "bins": [asdict(b) for b in report.bins],
-                "sweet_spot_temp": report.sweet_spot_temp,
-                "sweet_spot_efficiency": report.sweet_spot_efficiency,
-                "knee_temp": report.knee_temp,
-                "sample_count": report.sample_count,
-                "t_ambient": report.t_ambient,
-                "t_max": report.t_max,
-            }
-            gc.collect()
-            return out
+            from coolstep.core.efficiency import compute_historical
 
-        body = await asyncio.to_thread(_work)
-        return JSONResponse(put(body))
+            def _work() -> dict:
+                report = compute_historical(_store_path(), since_seconds=_parse_window(since))
+                out = {
+                    "bins": [asdict(b) for b in report.bins],
+                    "sweet_spot_temp": report.sweet_spot_temp,
+                    "sweet_spot_efficiency": report.sweet_spot_efficiency,
+                    "knee_temp": report.knee_temp,
+                    "sample_count": report.sample_count,
+                    "t_ambient": report.t_ambient,
+                    "t_max": report.t_max,
+                }
+                gc.collect()
+                return out
+
+            body = await asyncio.to_thread(_work)
+            return JSONResponse(put(body))
 
     @app.get("/api/drift")
     async def drift() -> JSONResponse:
@@ -1653,8 +1689,13 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         return JSONResponse(put(body))
 
     @app.get("/api/event-segments")
-    async def get_event_segments(since: str = "24h", limit: int = 50) -> JSONResponse:
-        """Recent session boundaries from `data/segments.jsonl` (daemon-written)."""
+    async def get_event_segments(since: str = "24h", limit: int = 500) -> JSONResponse:
+        """Recent session boundaries from `data/segments.jsonl` (daemon-written).
+
+        Default limit=500 (was 50): a 24h window can accumulate 80+ boundaries
+        on a busy session; capping at 50 produced systematic under-count in the
+        tile display. 500 covers ~1 week of typical session activity.
+        """
         cached, put = _cached_endpoint(f"event_segments:{since}:{limit}", 5.0)
         if cached is not None:
             return JSONResponse(cached)
