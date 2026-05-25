@@ -3,7 +3,7 @@
 > Точка входа в Python-пакет. Тут живёт `daemon.py`, всё остальное — подмодули.
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-24
+**Last synced with master:** 2026-05-25
 **Connectors:**
 - ↑ master → `~/coolstep/CLAUDE.md`
 - ↓ children → `core/CLAUDE.md`, `adapters/CLAUDE.md`, `dashboard/CLAUDE.md`, `inspect/CLAUDE.md`

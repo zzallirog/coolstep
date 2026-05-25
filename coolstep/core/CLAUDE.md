@@ -4,7 +4,7 @@
 > SDK. Только данные и логика над данными.
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-24
+**Last synced with master:** 2026-05-25
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - ← consumed by → `adapters/`, `dashboard/`, `inspect/`, `daemon.py`
