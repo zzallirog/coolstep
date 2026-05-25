@@ -1,6 +1,8 @@
 import { LitElement, html, css, fetchJson, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class DiscoveredSignalsTile extends LitElement {
+  static get priority() { return 'lazy'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -45,9 +47,17 @@ export class DiscoveredSignalsTile extends LitElement {
     this.activeCollector = null;
   }
 
-  async connectedCallback() {
+  connectedCallback() {
     super.connectedCallback();
-    const data = await fetchJson('/api/discoveries', { signals: [], total: 0 });
+    orchestrator.register('discovered-signals-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  async _mount() {
+    const data = await orchestrator.fetchJson('/api/discoveries', { signals: [], total: 0 });
     this.signals = data.signals || [];
   }
 

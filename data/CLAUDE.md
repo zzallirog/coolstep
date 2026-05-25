@@ -3,7 +3,7 @@
 > Runtime persistence. Не коммитится в git (`.gitignore`).
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Last synced with master:** 2026-05-23
 
 ## Layout (runtime)
 

@@ -52,7 +52,7 @@ def extract(window: Sequence[TelemetryFrame]) -> dict[str, float]:
     # bidirectional jitter).
     _short_n = 5
     short_pairs = [
-        (f, t) for f, t in zip(window, cpu_temps_seq) if t is not None
+        (f, t) for f, t in zip(window, cpu_temps_seq, strict=False) if t is not None
     ][-_short_n:]
     gpu_temps = [
         max((g.temp_c for g in f.gpus if g.temp_c is not None), default=None) for f in window
@@ -91,7 +91,7 @@ def extract(window: Sequence[TelemetryFrame]) -> dict[str, float]:
         # otherwise the phase axis falls back to plateau (safe default).
         cutoff_ts = window[-1].timestamp - 300.0
         temps_5min = [
-            t for f, t in zip(window, cpu_temps_seq)
+            t for f, t in zip(window, cpu_temps_seq, strict=False)
             if t is not None and f.timestamp >= cutoff_ts
         ]
         if len(temps_5min) >= 2:

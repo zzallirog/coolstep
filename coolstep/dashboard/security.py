@@ -138,9 +138,7 @@ class HardeningMiddleware(BaseHTTPMiddleware):
             sec_fetch_site = request.headers.get("sec-fetch-site")
             origin = request.headers.get("origin")
             ok = False
-            if sec_fetch_site in {"same-origin", "none"}:
-                ok = True
-            elif origin and origin.lower() in self.origin_allowlist:
+            if sec_fetch_site in {"same-origin", "none"} or origin and origin.lower() in self.origin_allowlist:
                 ok = True
             elif origin is None and sec_fetch_site is None:
                 # Non-browser caller (curl, systemd timer, internal CLI).

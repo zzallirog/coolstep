@@ -79,10 +79,7 @@ class EwmaFilter:
             t = float(temp)
             tgt = float(target_pwm)
             prev = self._prev.get(t)
-            if prev is None:
-                smoothed = tgt
-            else:
-                smoothed = alpha * tgt + (1.0 - alpha) * prev
+            smoothed = tgt if prev is None else alpha * tgt + (1.0 - alpha) * prev
             self._prev[t] = smoothed
             out.append((t, smoothed))
         return out

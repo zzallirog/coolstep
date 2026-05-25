@@ -7,8 +7,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![v0.5.15](https://img.shields.io/badge/release-v0.5.15-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.15)
-[![tests](https://img.shields.io/badge/tests-932_passed-brightgreen)](#tested-against)
+[![v0.5.19](https://img.shields.io/badge/release-v0.5.19-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.19)
+[![tests](https://img.shields.io/badge/tests-913_passed-brightgreen)](#tested-against)
 [![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
 
 <picture>
@@ -336,6 +336,22 @@ override — and even then, only after the eight calibration gates
 | `coolstep predict-debug` | Inspect predictor buckets and weights |
 | `coolstep predict-replay` | Replay predictions over historical data |
 
+### Upgrade · Uninstall · Storage footprint
+
+- **Upgrade.** `pipx upgrade coolstep` (Path A) or `pip install --user
+  --break-system-packages -U git+https://github.com/zzallirog/coolstep`
+  (Path B), then `systemctl --user restart coolstep-collector
+  coolstep-dashboard`. State-file migration contract + known schema
+  breaks → [`docs/upgrade.md`](docs/upgrade.md).
+- **Uninstall.** `pipx uninstall` / `pip uninstall` remove the package
+  only. Unit files in `~/.config/systemd/user/` and runtime state in
+  `~/coolstep/data/` (up to ~2 GB) remain orphan — full purge recipe
+  → [`docs/uninstall.md`](docs/uninstall.md).
+- **Storage.** Default 1 Hz collector × 14d retention ≈ 1.5–2 GB
+  steady-state for `store.db`. Knobs (`--period`, `COOLSTEP_HOME`)
+  and concrete production numbers →
+  [`docs/headless-deployment.md#storage-footprint`](docs/headless-deployment.md#storage-footprint).
+
 ### Requirements
 
 - Linux kernel ≥ 5.10
@@ -358,13 +374,30 @@ override — and even then, only after the eight calibration gates
   [docs/privileges.md](docs/privileges.md) for the full table and the
   per-capability systemd drop-in templates.
 
+### Tested on
+
+| Distro | Status |
+|---|---|
+| Arch Linux (Hyprland / KDE / GNOME) | ✅ verified — daily-driver target |
+| Debian 12 / Ubuntu 22.04+ | ✅ verified — headless deployment |
+| Fedora 39+ / RHEL 9+ | ⚠️ expected to work (linux_sysfs universal, hw fixtures present), runtime not verified |
+| openSUSE Tumbleweed / Leap | ⚠️ expected to work, not verified |
+| Alpine, NixOS | ⚠️ Python + systemd-user assumed; not verified |
+| macOS, Windows | ❌ P4+ roadmap |
+
+`docs/hw-matrix.md` includes Fedora / RHEL / Ubuntu / Debian static
+`/sys + /proc + /etc` snapshots — these exercise `detect_caps()`
+parsing, not end-to-end runtime. Real install reports from non-Arch /
+non-Debian distros are welcome via
+[GitHub Discussions](https://github.com/zzallirog/coolstep/discussions).
+
 ---
 
 ## Roadmap
 
 | Phase | Status |
 |---|---|
-| P0 — foundation, four collectors, dashboard | ✅ |
+| P0 — foundation, four collectors, dashboard (now 12 collectors / 6 actuators) | ✅ |
 | P1 — calibration window, throttle FSM, audit closure | ✅ |
 | P2 — actuator stack with sandbox-first defaults | ✅ |
 | P2.5 — perf and ML/control hardening | ✅ |
@@ -395,10 +428,12 @@ override — and even then, only after the eight calibration gates
 | [`docs/efficiency-curve.md`](docs/efficiency-curve.md) | `work_per_degree`, the sweet spot, and the knee |
 | [`docs/curve-ownership.md`](docs/curve-ownership.md) | Who manages the fan curve at each layer — BIOS, vendor tool, your profile, coolstep bias — and where coolstep's authority ends |
 | [`docs/drift-detection.md`](docs/drift-detection.md) | Seven indicators that the model has gone stale |
-| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Fifteen ADRs covering why this stack and not another |
+| [`docs/stack-decisions.md`](docs/stack-decisions.md) | Twenty-one ADRs covering why this stack and not another |
 | [`docs/p3-plan.md`](docs/p3-plan.md) | The two-target design and the three-layer manifest |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Every warning `coolstep compat` can print, with per-distro fixes |
 | [`docs/privileges.md`](docs/privileges.md) | What needs root, why, and how to grant the minimum safely |
+| [`docs/upgrade.md`](docs/upgrade.md) | Upgrade commands per install path, state-file migration contract, known schema breaks |
+| [`docs/uninstall.md`](docs/uninstall.md) | Full purge recipe — package, units, drop-ins, runtime state, journals |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | What we accept readily and what needs discussion |
 | [`CHANGELOG.md`](CHANGELOG.md) | Feature history by version |
 

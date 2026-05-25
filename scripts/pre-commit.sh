@@ -5,7 +5,12 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve REPO_ROOT through the symlink — when this script lives at
+# .git/hooks/pre-commit (a symlink), `$0` would point inside .git/ and
+# `dirname $0/..` would land at the .git directory itself, not the repo.
+# `readlink -f` on $BASH_SOURCE follows the chain to the real script.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "==> pre-commit: ruff check"

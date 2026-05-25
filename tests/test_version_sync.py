@@ -9,7 +9,6 @@ See `docs/aur-publishing.md` § G-2 for full case study.
 
 from __future__ import annotations
 
-import sys
 import tomllib
 from pathlib import Path
 

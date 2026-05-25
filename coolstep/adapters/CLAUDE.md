@@ -4,7 +4,7 @@
 > внешние SDK, vendor commands.
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Last synced with master:** 2026-05-25
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - ↓ children → `collectors/CLAUDE.md`, `actuators/CLAUDE.md`

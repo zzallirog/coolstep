@@ -92,6 +92,13 @@ class HnswStore:
         self._initial_capacity = initial_capacity
         self._index: Any = None
         self._db: sqlite3.Connection | None = None
+        # Tracks the inode of meta.sqlite that `self._db` is bound to. When
+        # `embedder_refit.refit_and_swap` rotates persist_dir out (live →
+        # backup → wipe-on-next-refit), the cached fd points at a deleted
+        # inode and SQLite writes start failing with SQLITE_READONLY. We
+        # compare the cached inode against the live one before every write
+        # and reopen on mismatch. See: hnsw orphan-fd diagnosis 2026-05-25.
+        self._db_inode: int | None = None
         self._available = False
         self._lock = RLock()
 
@@ -136,8 +143,9 @@ class HnswStore:
                     allow_replace_deleted=True,
                 )
             self._index.set_ef(DEFAULT_EF_QUERY)
+            meta_path = self.persist_dir / META_FILENAME
             self._db = sqlite3.connect(
-                self.persist_dir / META_FILENAME,
+                meta_path,
                 check_same_thread=False,
                 isolation_level=None,
             )
@@ -149,6 +157,10 @@ class HnswStore:
                 ")"
             )
             self._db.execute("CREATE INDEX IF NOT EXISTS meta_ts ON meta(ts)")
+            try:
+                self._db_inode = meta_path.stat().st_ino
+            except OSError:
+                self._db_inode = None
             self._available = True
             return True
         except Exception as exc:  # noqa: BLE001
@@ -159,6 +171,80 @@ class HnswStore:
     @property
     def available(self) -> bool:
         return self._available
+
+    def _ensure_db_live(self) -> None:
+        """Reopen `self._db` if the meta.sqlite inode under us has changed.
+
+        `embedder_refit.refit_and_swap` does an atomic dir swap:
+        `live → live.backup`, `staging → live`, then `rmtree(live.backup)`
+        on the NEXT refit. Our cached sqlite3 connection still holds an fd
+        to the old (now-deleted) inode after the first refit, and starts
+        returning SQLITE_READONLY on the second one because the rollback
+        journal cannot be created in the vanished parent directory.
+
+        Compare cached inode against the on-disk inode (cheap stat()) and
+        rebuild the connection on mismatch. Holds `self._lock` because we
+        mutate `self._db` and callers expect serialised access.
+        """
+        if not self._available:
+            return
+        meta_path = self.persist_dir / META_FILENAME
+        try:
+            current_inode = meta_path.stat().st_ino
+        except FileNotFoundError:
+            # meta.sqlite vanished — likely mid-refit rename window. Drop the
+            # stale connection and reopen fresh; sqlite will create the file.
+            log.warning(
+                "HnswStore: meta.sqlite missing under %s — reopening",
+                self.persist_dir,
+            )
+            current_inode = None
+        except OSError as exc:
+            log.warning("HnswStore: stat(meta.sqlite) failed: %s", exc)
+            return
+
+        if current_inode is not None and current_inode == self._db_inode:
+            return
+
+        old_inode = self._db_inode
+        try:
+            if self._db is not None:
+                try:
+                    self._db.close()
+                except sqlite3.Error as exc:
+                    log.debug("HnswStore: close stale db: %s", exc)
+                self._db = None
+                self._db_inode = None
+            self.persist_dir.mkdir(parents=True, exist_ok=True)
+            new_db = sqlite3.connect(
+                meta_path,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            new_db.execute(
+                "CREATE TABLE IF NOT EXISTS meta ("
+                " id INTEGER PRIMARY KEY,"
+                " ts REAL NOT NULL,"
+                " meta_json TEXT NOT NULL"
+                ")"
+            )
+            new_db.execute("CREATE INDEX IF NOT EXISTS meta_ts ON meta(ts)")
+            self._db = new_db
+            try:
+                self._db_inode = meta_path.stat().st_ino
+            except OSError:
+                self._db_inode = None
+            log.warning(
+                "HnswStore: meta.sqlite inode changed (%s → %s), reopened",
+                old_inode,
+                self._db_inode,
+            )
+        except sqlite3.Error as exc:
+            # A second rename can race us here. Surface, but don't crash the
+            # caller — the next tick retries.
+            log.warning("HnswStore: reopen after inode swap failed: %s", exc)
+            self._db = None
+            self._db_inode = None
 
     def _ensure_capacity(self) -> None:
         if self._index is None:
@@ -174,6 +260,13 @@ class HnswStore:
         id_ = _ts_to_id(ts)
         vec = np.asarray(vector, dtype=np.float32).reshape(1, -1)
         with self._lock:
+            # Defensive reopen — refit_and_swap can rotate persist_dir under
+            # us between ticks. Cheap stat() check; reopens only on inode
+            # mismatch. Without this, fd points at a deleted inode and
+            # SQLite returns SQLITE_READONLY ~every 5s after refit fires.
+            self._ensure_db_live()
+            if self._db is None:
+                return
             try:
                 self._ensure_capacity()
                 # replace_deleted=True covers both fresh ids and re-adds of an

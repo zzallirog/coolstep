@@ -4,7 +4,7 @@
 > этот файл**, затем перейди в нужный subdir по карте ниже. Не читай весь
 > код — он избыточен. Используй карту.
 
-**Repo version:** 0.5.0 (P2.5 — adaptive curve + incidents + workload profiles + event segmentation, 2026-05-12)
+**Repo version:** 0.5.19 (round1/2/3 perf+correctness sweep: cache stampede locks, frontend orchestrator, local Lit min, daemon_seen via mtime, event-segments wiring — 2026-05-25)
 **Walk protocol:** см. секцию «Self-update protocol» внизу.
 
 > **P2.10 ship-status (2026-05-16):** workload awareness rework — see
@@ -174,25 +174,47 @@ gh release list --repo zzallirog/coolstep
 - При **появлении нового subdir** с собственным CLAUDE.md → добавь в карту + Fast paths.
 - При **изменении цикла lifecycle / архитектуры верхнего уровня** → обнови TL;DR.
 
-### Walk-the-tree (диагностика)
-
-Запусти когда подозреваешь, что дочерние отстали:
+### Drift-check автоматизирован (2026-05-23)
 
 ```bash
-# 1. найти все CLAUDE.md
-find . -name CLAUDE.md -not -path './.venv/*' | sort
+# Human-readable report (exits 1 if drift)
+python3 scripts/claude-md-drift-check.py
 
-# 2. для каждого — извлечь Last synced
+# Auto-bump stale "Last synced" dates in-place (tables stay manual)
+python3 scripts/claude-md-drift-check.py --bump-stamps
+
+# JSON output для tooling
+python3 scripts/claude-md-drift-check.py --json
+```
+
+Что проверяет (см. `scripts/claude-md-drift-check.py`):
+
+1. **stamp drift** — `Last synced with master:` старше последнего коммита
+   в subdir. Auto-fixable через `--bump-stamps`.
+2. **structural drift** — таблицы в child CLAUDE.md расходятся с диском:
+   - `collectors/CLAUDE.md` — кол-во строк vs. файлов в директории
+   - `actuators/CLAUDE.md` — то же
+   - `dashboard/CLAUDE.md` — каждый `@app.{get,post}(...)` роут должен
+     быть упомянут в файле (membership-check, не row-count)
+   - `systemd/CLAUDE.md` — кол-во строк vs. `.service`/`.timer`
+   - `docs/CLAUDE.md` — если упоминается «N ADRs», N должен совпадать с
+     `## ADR-` headers в `stack-decisions.md`
+3. **version drift** — master `Repo version:` vs `pyproject.toml`.
+
+### Pre-push hook
+
+`scripts/pre-push.sh` (установлен через `bash scripts/install-hooks.sh`):
+auto-bump stamps → если structural drift остаётся → push блокируется с
+подсказкой какой child править. Bypass `git push --no-verify`.
+
+### Walk-the-tree (ручная диагностика)
+
+```bash
+find . -name CLAUDE.md -not -path './.venv/*' | sort
 for f in $(find . -name CLAUDE.md -not -path './.venv/*'); do
     echo "$f: $(grep 'Last synced with master' "$f" | head -1)"
 done
-
-# 3. сравнить версии (Module version) с этим master CLAUDE.md
-# Несоответствие = candidate для re-sync.
 ```
-
-В будущем (P3+): автоматизировать через
-[future skill `coolstep-claude-md-audit`].
 
 ### Версионирование
 

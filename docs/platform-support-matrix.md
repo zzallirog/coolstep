@@ -9,10 +9,25 @@
 |---|---|---|---|
 | **Linux laptop** (target: ASUS TUF A15, AMD+NVIDIA) | linux_sysfs, amdgpu, nvidia_nvml, hyprctl | readonly_log | ✅ live, 4/4 discovers, 98 tests |
 | Linux desktop (без iGPU/без Hyprland) | linux_sysfs, nvidia_nvml | readonly_log | ⚠️ должно работать (linux_sysfs универсален), не verified |
-| Linux headless server | linux_sysfs (без hyprctl) | readonly_log | ⚠️ работает в обозримом виде, не verified |
+| **Linux headless server** (Intel i5-13500 / Debian 13 / kernel 6.12) | linux_sysfs, intel_i915, dbus_session, rapl_energy | readonly_log | ✅ live since 2026-05-12, 5/5 discovers, headless via linger |
 | Windows | none | none | ❌ |
 | macOS | none | none | ❌ |
 | BMC/IPMI server | none | none | ❌ |
+
+### Measured `linux_sysfs` sample latency
+
+Steady-state cost over a 200-tick window on production hosts. Daemon
+loop = 1 Hz (`coolstep-collector.service --period 1.0`).
+
+| Host | Topology | median | p95 | Source |
+|---|---|---|---|---|
+| ASUS TUF A15 (Ryzen 7940HS, 16 logical) | k10temp (4 inputs) + asus fans + nvme | ~16 ms | — | `docs/p2.5-rollup.md` |
+| Intel i5-13500 server (20 logical) | coretemp (15 inputs) + 2× nvme + acpitz + asus | 19.7 ms | 20.5 ms | profiled 2026-05-23 (issue #5) |
+
+Bimodal distribution on Intel comes from selective-refresh schedule
+(`FREQ_REFRESH_TICKS=3` + `VOLTAGE_REFRESH_TICKS=5`): «fast» ticks ~12 ms,
+«slow» ticks (freq+voltage refresh together) ~20 ms. Acceptable —
+budget is `<100 ms` per sample.
 
 ## Планируемая
 

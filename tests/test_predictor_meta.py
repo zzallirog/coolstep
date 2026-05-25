@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from coolstep.core.predictor import Prediction, TrajectoryBaseline
+from coolstep.core.predictor import TrajectoryBaseline
 from coolstep.core.predictor_meta import MetaPredictor
 from coolstep.core.residual_meta import ResidualBank
 

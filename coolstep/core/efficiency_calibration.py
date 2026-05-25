@@ -70,10 +70,7 @@ class EfficiencyRow:
 
 def _efficiency_path() -> Path:
     home_env = os.environ.get("COOLSTEP_HOME")
-    if home_env:
-        home = Path(home_env)
-    else:
-        home = Path.home() / "coolstep" / "data"
+    home = Path(home_env) if home_env else Path.home() / "coolstep" / "data"
     return home / EFFICIENCY_FILE
 
 
@@ -400,9 +397,7 @@ def load_table(path: Path | None = None) -> list[EfficiencyRow]:
         if prev is None:
             best[key] = row
             continue
-        if row.min_rpm_for_stable < prev.min_rpm_for_stable:
-            best[key] = row
-        elif (
+        if row.min_rpm_for_stable < prev.min_rpm_for_stable or (
             row.min_rpm_for_stable == prev.min_rpm_for_stable
             and row.last_seen_ts > prev.last_seen_ts
         ):

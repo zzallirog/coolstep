@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from unittest.mock import patch
 
 FIXTURES_DIR = Path(__file__).parent
@@ -72,7 +73,7 @@ class Snapshot:
     hypr_socket: str | None = None  # signature; presence => socket exists
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Snapshot":
+    def from_dict(cls, data: dict[str, Any]) -> Snapshot:
         keys = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in keys})
 

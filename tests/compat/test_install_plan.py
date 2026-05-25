@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from coolstep.compat.caps import PlatformCaps
 from coolstep.compat.install_plan import caps_to_install_plan
 

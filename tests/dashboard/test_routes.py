@@ -29,6 +29,10 @@ def client(tmp_path, monkeypatch):
     )
     store.write_frame(frame)
     store.close()
+    # daemon_seen check uses ml-state.json mtime (written every tick),
+    # not bare store.db existence. Create a fresh ml-state.json so the
+    # test fixture mimics a live daemon.
+    (home / "ml-state.json").write_text('{"tick":1}')
     monkeypatch.setenv("COOLSTEP_HOME", str(home))
     app = create_app()
     return TestClient(app)
@@ -141,7 +145,10 @@ def test_stack_rationale_parses(client):
     assert len(body["adrs"]) >= 5  # docs/stack-decisions.md содержит 12 ADR
 
 
-def test_ml_state_404_when_absent(client):
+def test_ml_state_404_when_absent(client, tmp_path):
+    # client fixture writes a sentinel ml-state.json so daemon_seen works;
+    # unlink it for this test (which probes the absent-file path).
+    (tmp_path / "data" / "ml-state.json").unlink()
     r = client.get("/api/ml-state")
     assert r.status_code == 404
 
@@ -479,7 +486,8 @@ def test_stress_runs_limit_clamps(client, tmp_path, monkeypatch):
     assert len(body["runs"]) == 2
 
 
-def test_predictor_breakdown_404_when_no_ml_state(client):
+def test_predictor_breakdown_404_when_no_ml_state(client, tmp_path):
+    (tmp_path / "data" / "ml-state.json").unlink()
     r = client.get("/api/predictor-breakdown")
     assert r.status_code == 404
 

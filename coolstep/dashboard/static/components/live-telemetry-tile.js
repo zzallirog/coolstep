@@ -1,6 +1,8 @@
 import { LitElement, html, css, fmtNum, tileBaseStyles, fetchJson, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class LiveTelemetryTile extends LitElement {
+  static get priority() { return 'critical'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -92,13 +94,16 @@ export class LiveTelemetryTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Balance-plan step IV (2026-05-14): SSE replaced by 1Hz polling.
-    // /api/sse/telemetry was a `while True; yield; sleep(1)` masquerade —
-    // not push, just polling held open as a long-lived connection. Long-
-    // lived starlette streams contributed to the dashboard heap growth.
-    // Plain fetch + setInterval is the same data with simpler lifecycle.
-    this._refreshAll();
-    this._pollTimer = setInterval(() => this._refreshAll(), 1000);
+    orchestrator.register('live-telemetry-tile', {
+      priority: 'critical',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
+    // Subscribe to shared 1Hz telemetry poller instead of own setInterval.
+    this._unsubTelemetry = orchestrator.subscribeTelemetry((data) => this._onTelemetry(data));
     this._ageTimer = setInterval(() => {
       if (this.summary?.ts) this.ageSec = Math.round(Date.now() / 1000 - this.summary.ts);
     }, 1000);
@@ -106,14 +111,11 @@ export class LiveTelemetryTile extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    clearInterval(this._pollTimer);
+    if (this._unsubTelemetry) this._unsubTelemetry();
     clearInterval(this._ageTimer);
   }
 
-  async _refreshAll() {
-    const data = await fetchJson('/api/telemetry/latest', null);
-    if (!data) return;
-    // Dedup on ts (used to live on the SSE server side as `last_ts`).
+  _onTelemetry(data) {
     if (this.summary?.ts !== data.ts) {
       this.summary = data;
       this.ageSec = 0;
@@ -122,6 +124,13 @@ export class LiveTelemetryTile extends LitElement {
       this.raw = data.raw;
       this.error = null;
     }
+  }
+
+  // Keep fetchJson wrapper for compatibility
+  async _refreshAll() {
+    const data = await orchestrator.fetchJson('/api/telemetry/latest', null, { priority: 'critical' });
+    if (!data) return;
+    this._onTelemetry(data);
   }
 
   _renderCores() {

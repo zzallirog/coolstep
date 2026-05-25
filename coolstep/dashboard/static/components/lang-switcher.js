@@ -5,7 +5,7 @@
  *
  * No tile-base styles — it's a chrome control, not a tile. Light DOM-ish
  * via shadow root for style isolation. */
-import { LitElement, html, css } from 'https://esm.sh/lit@3';
+import { LitElement, html, css } from '/static/vendor/lit.min.js';
 import { LangStore, LangController, LANGS } from '../i18n/lang-store.js';
 
 class LangSwitcher extends LitElement {

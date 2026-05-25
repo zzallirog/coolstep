@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-import pytest
-
-from coolstep.adapters.collectors.ebpf_sched import EbpfSchedCollector, _can_run_bpf
+from coolstep.adapters.collectors.ebpf_sched import EbpfSchedCollector
 
 
 class TestConsumeMap:

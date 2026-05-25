@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from coolstep.adapters.collectors.redfish import RedfishCollector
-
 
 _THERMAL_PAYLOAD = {
     "Fans": [

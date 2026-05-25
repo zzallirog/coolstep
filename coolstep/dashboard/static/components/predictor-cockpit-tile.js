@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /**
  * Predictor cockpit — relational readout of the meta-predictor.
@@ -791,8 +792,18 @@ export class PredictorCockpitTile extends LitElement {
     return 'archive-led';
   }
 
+  static get priority() { return 'normal'; }
+
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('predictor-cockpit-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._stopped = false;
     document.addEventListener('visibilitychange', this._onVisibilityChange);
     this._scheduleRefresh(0);
@@ -850,7 +861,7 @@ export class PredictorCockpitTile extends LitElement {
 
   async _refresh() {
     const scope = this.activeScope || PredictorCockpitTile.SCOPE_DEFAULT;
-    const data = await fetchJson(`/api/predictor-cockpit?scope_s=${scope}`, null);
+    const data = await orchestrator.fetchJson(`/api/predictor-cockpit?scope_s=${scope}`, null);
     if (!data) return;
     const newChangedAt = data.profile_changed_at;
     if (
@@ -1057,7 +1068,7 @@ export class PredictorCockpitTile extends LitElement {
     // (which the operator reads as ground truth) is untouched.
     for (let i = 1; i < trail.length; i++) {
       const cur = trail[i], prev = trail[i - 1];
-      if (cur.t == null || prev.t == null) continue;
+      if (cur.t == null || prev.t == null || isNaN(cur.t) || isNaN(prev.t)) continue;
       trail[i] = { ...cur, t: 0.4 * cur.t + 0.6 * prev.t };
     }
     if (trail.length >= 2) {

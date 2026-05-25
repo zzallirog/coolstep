@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from coolstep import __version__
 from coolstep.adapters.collectors import discover as discover_collectors
 from coolstep.core._helpers import canonical_cpu_temp
 from coolstep.core.schema import ActionVerb, TelemetryFrame, merge_partial
@@ -33,6 +34,7 @@ def _store_path() -> Path:
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="coolstep")
 def main() -> None:
     """coolstep — predictive soft-cooling."""
 
@@ -104,7 +106,7 @@ def adapters(detailed: bool, as_json: bool) -> None:
 
 
 @main.command()
-@click.option("--ticks", default=10, type=int, help="Number of ticks to print")
+@click.option("-n", "--ticks", default=10, type=int, help="Number of ticks to print")
 @click.option("--period", default=1.0, type=float)
 def tail(ticks: int, period: float) -> None:
     """Live print N consecutive ticks gathered from collectors directly."""

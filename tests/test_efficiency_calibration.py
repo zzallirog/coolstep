@@ -19,7 +19,6 @@ from coolstep.core.schema import (
     WorkloadFrame,
 )
 
-
 # ── fixtures ──────────────────────────────────────────────────────────
 
 

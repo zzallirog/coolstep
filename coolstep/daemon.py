@@ -17,6 +17,7 @@ Designed to run as user-systemd unit. Catches SIGTERM, flushes store, exits 0.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from typing import Any
 
 import click
 
+from coolstep import __version__
 from coolstep.adapters.actuators import discover as discover_actuators
 from coolstep.adapters.actuators._base import Actuator
 from coolstep.adapters.collectors import discover as discover_collectors
@@ -140,7 +142,7 @@ def _coolstep_home() -> Path:
     return Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
 
 
-def _log_backfill_exception(task: "asyncio.Task[Any]") -> None:
+def _log_backfill_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -148,7 +150,7 @@ def _log_backfill_exception(task: "asyncio.Task[Any]") -> None:
         log.debug("incremental backfill failed: %r", exc)
 
 
-def _log_spike_incident_exception(task: "asyncio.Task[Any]") -> None:
+def _log_spike_incident_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -156,7 +158,7 @@ def _log_spike_incident_exception(task: "asyncio.Task[Any]") -> None:
         log.debug("spike incident write failed: %r", exc)
 
 
-def _log_rotate_exception(task: "asyncio.Task[Any]") -> None:
+def _log_rotate_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -164,7 +166,7 @@ def _log_rotate_exception(task: "asyncio.Task[Any]") -> None:
         log.warning("store rotate failed: %r", exc)
 
 
-def _log_chroma_guard_exception(task: "asyncio.Task[Any]") -> None:
+def _log_chroma_guard_exception(task: asyncio.Task[Any]) -> None:
     if task.cancelled():
         return
     exc = task.exception()
@@ -287,6 +289,17 @@ class Daemon:
         self._cached_chroma_dir_bytes: int = 0
         self._cached_labeled_count: int = 0
         self._chroma_stats_refresh_every: int = 30
+        # P2.9.6 follow-up (2026-05-25): same pattern for sqlite COUNT()s.
+        # store.db grew to 3.6 GB (1.79M rows in `frames`) — each
+        # SELECT COUNT(*) FROM frames takes ~200ms, and `_dump_ml_state`
+        # called three of them every tick (`count_frames`,
+        # `count_throttle_events`, `coverage_seconds`) so the tick total
+        # ballooned to 500-600 ms (>1 Hz budget).  Refresh on the same
+        # 30-tick cadence as chroma stats; values are 0 until the first
+        # refresh completes — dashboard already tolerates stale stats.
+        self._cached_frames_count: int = 0
+        self._cached_throttle_events_count: int = 0
+        self._cached_coverage_seconds: float = 0.0
         self._labelled_window: list[TelemetryFrame] = []  # buffer for backfill
         self._started_at = time.time()
         # Throttle FSM: idle ↔ hot, hysteresis 90/85°C. Open «hot» episode
@@ -446,10 +459,8 @@ class Daemon:
                     break
                 elapsed = time.monotonic() - t0
                 sleep_for = max(0.0, self.period - elapsed)
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
-                except TimeoutError:
-                    pass
         finally:
             self._revert_all_armed("shutdown")
             self._persist_runtime_state()
@@ -495,6 +506,35 @@ class Daemon:
             self._cached_chroma_dir_bytes = int(size or 0)
         except Exception as exc:  # noqa: BLE001
             log.debug("chroma stats refresh failed: %r", exc)
+
+    async def _refresh_store_stats(self) -> None:
+        """Background refresh of cached sqlite COUNT()s (2026-05-25).
+
+        `store.count_frames()` / `count_throttle_events()` / `coverage_seconds()`
+        were called from `_dump_ml_state` every tick.  On a 3.6 GB store.db
+        (1.79M rows in `frames`) each `SELECT COUNT(*)` costs ~200 ms; three
+        of them per tick blew the 1 Hz budget.  Refreshed every ~30 ticks
+        on the same cadence as chroma stats.  Each call is isolated in its
+        own try/except so one bad call (locked db, schema mismatch) doesn't
+        wipe the other two cached values."""
+        try:
+            self._cached_frames_count = int(
+                await asyncio.to_thread(self.store.count_frames)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("store.count_frames refresh failed: %r", exc)
+        try:
+            self._cached_throttle_events_count = int(
+                await asyncio.to_thread(self.store.count_throttle_events)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("store.count_throttle_events refresh failed: %r", exc)
+        try:
+            self._cached_coverage_seconds = float(
+                await asyncio.to_thread(self.store.coverage_seconds)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("store.coverage_seconds refresh failed: %r", exc)
 
     def _guarded_refit_check(self) -> None:
         """Wrap `_embedder_refit_check` so `_refit_inflight` is always cleared,
@@ -744,6 +784,21 @@ class Daemon:
                     "event_segmenter: boundary reason=%s session=%s",
                     boundary.reason, boundary.new_session_id,
                 )
+                # Persist for /api/event-segments tail. Was dropped on-the-floor
+                # → dashboard showed "no segments yet" forever even when daemon
+                # logs proved boundaries fire. Same jsonl-tail pattern as
+                # incidents.jsonl. Volume is low (rare events, ~10s/hour).
+                try:
+                    seg_path = _coolstep_home() / "segments.jsonl"
+                    with open(seg_path, "a") as f:
+                        f.write(json.dumps({
+                            "ts": time.time(),
+                            "reason": boundary.reason,
+                            "session_id": boundary.new_session_id,
+                            "prev_session_id": boundary.prev_session_id,
+                        }) + "\n")
+                except OSError as _exc:
+                    pass  # best-effort; daemon must not crash on disk pressure
                 # P2.9.7 fix (2026-05-13): residual bank holds per-bucket
                 # EWMA bias from the *previous* workload.  When a load_jump
                 # opens a new session, that bias is stale — feature vectors
@@ -1032,6 +1087,21 @@ class Daemon:
             and self._tick_count % every_30s == 0
         ):
             asyncio.create_task(self._refresh_chroma_stats())
+
+        # P2.9.6 follow-up (2026-05-25): same cadence for sqlite COUNT()s.
+        # `count_frames`/`count_throttle_events`/`coverage_seconds` were
+        # the new tick hot-spot once store.db crossed ~3.6 GB (was 200 MB
+        # when the P2.9.6 pass shipped).  Fire-and-forget — cached values
+        # default to 0 until the first refresh lands.  Seed once on tick
+        # #1 so the dashboard doesn't show zeros for 30 s after start.
+        # Tracked in `_bg_tasks` so shutdown can drain in-flight refreshes
+        # instead of GC-warning about pending coroutines.
+        if self._tick_count == 1 or (
+            self._tick_count > 0 and self._tick_count % every_30s == 0
+        ):
+            _refresh_task = asyncio.create_task(self._refresh_store_stats())
+            self._bg_tasks.add(_refresh_task)
+            _refresh_task.add_done_callback(self._bg_tasks.discard)
 
         if self._tick_count % every_5min == 0 and self._tick_count > 0:
             await asyncio.to_thread(self._append_drift_history)
@@ -1925,7 +1995,7 @@ class Daemon:
             f for f in self._labelled_window if f.timestamp >= cutoff
         ]
 
-    def _on_backfill_labels_done(self, task: "asyncio.Task[Any]") -> None:
+    def _on_backfill_labels_done(self, task: asyncio.Task[Any]) -> None:
         if task.cancelled():
             return
         try:
@@ -1998,9 +2068,12 @@ class Daemon:
             "collectors": [c.name for c in self.collectors],
             "collector_costs_us": {c.name: c.cost().sample_us for c in self.collectors},
             "actuators": [a.name for a in self.actuators],
-            "frames_in_store": self.store.count_frames(),
-            "throttle_events_in_store": self.store.count_throttle_events(),
-            "coverage_seconds": self.store.coverage_seconds(),
+            # 2026-05-25: cached — refreshed every ~30 ticks in tick loop
+            # via `_refresh_store_stats`.  Direct COUNT(*) on a 3.6 GB
+            # store.db took ~200 ms × 3 calls = 600 ms per tick.
+            "frames_in_store": self._cached_frames_count,
+            "throttle_events_in_store": self._cached_throttle_events_count,
+            "coverage_seconds": self._cached_coverage_seconds,
             "embedder_fitted": self.embedder.fitted,
             "chroma_available": self.chroma.available,
             # P2.9.6 phase 3: cached — refreshed every ~30 ticks in tick loop.
@@ -2090,6 +2163,7 @@ class Daemon:
 
 
 @click.command()
+@click.version_option(version=__version__, prog_name="coolstep-collector")
 @click.option("--period", default=DEFAULT_PERIOD, type=float, help="Sample period (seconds)")
 @click.option("--smoke", is_flag=True, help="Run for max_ticks and exit (smoke test)")
 @click.option("--max-ticks", default=None, type=int, help="Exit after N ticks (default: forever)")

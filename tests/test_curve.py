@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from coolstep.core.curve import (
-    CurveContext,
     Anchor,
+    CurveContext,
     compose_curve,
     curve_signature,
     emergency_ramp,
@@ -21,7 +19,6 @@ from coolstep.core.curve import (
     workload_profile_shape,
 )
 from coolstep.core.workload_profile import is_headroom_class
-
 
 # A baseline that mirrors the new actuator default. Centered so policies
 # have something to bias around.

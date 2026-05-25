@@ -23,7 +23,6 @@ from coolstep.core.residual_meta import (
     quantise_temp_phase,
 )
 
-
 # --- quantisation ----------------------------------------------------------
 
 @pytest.mark.parametrize("v,expected", [
@@ -185,6 +184,7 @@ def test_from_log_migrates_v2_5tuple_to_v3_6tuple(tmp_path):
     uniformly. A v2-shaped record with no temp_now/avg_5min lands in
     plateau (1) — the documented cold-start behaviour."""
     import json
+
     from coolstep.core.residual_log import ResidualLog
 
     log_path = tmp_path / "residual-state.jsonl"
@@ -471,6 +471,7 @@ def test_from_log_migrates_v1_4tuple_to_v2_5tuple(tmp_path):
     features so the rebuilt bank uses 5-tuple keys uniformly — otherwise
     a later correct() call lands on a key shape mismatch."""
     import json
+
     from coolstep.core.residual_log import ResidualLog
 
     log_path = tmp_path / "residual-state.jsonl"

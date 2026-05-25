@@ -27,6 +27,7 @@ seconds keeps the hot-plug / driver-reload case alive.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -151,17 +152,13 @@ class _FdCache:
     def _evict(self, path: Path) -> None:
         fd = self._fds.pop(path, None)
         if fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
 
     def reset(self) -> None:
         for fd in self._fds.values():
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
         self._fds.clear()
 
     def __del__(self) -> None:

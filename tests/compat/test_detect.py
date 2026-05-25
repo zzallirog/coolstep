@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -250,7 +248,7 @@ class TestDetectCaps:
 
     def test_reset_caps_clears_singleton(self):
         from coolstep.compat import get_caps, reset_caps
-        a = get_caps()
+        get_caps()
         reset_caps(None)
         b = get_caps()
         # b is a new instance (new detection run)
@@ -259,9 +257,10 @@ class TestDetectCaps:
         assert b is not None
 
     def test_inject_fake_caps(self):
+        import time
+
         from coolstep.compat import get_caps, reset_caps
         from coolstep.compat.caps import PlatformCaps
-        import time
 
         fake = PlatformCaps(
             distro_id="test",

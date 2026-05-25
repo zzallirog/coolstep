@@ -25,6 +25,7 @@ periodic full snapshot.
 
 from __future__ import annotations
 
+import contextlib
 import mmap
 import os
 import struct
@@ -73,10 +74,7 @@ def runtime_dir() -> Path:
         # systemd guarantees this path exists with the right mode; just use it.
         return Path(runtime)
     xdg = os.environ.get("XDG_RUNTIME_DIR")
-    if xdg:
-        sub = Path(xdg) / "coolstep"
-    else:
-        sub = Path("/tmp") / f"coolstep-{os.getuid()}"
+    sub = Path(xdg) / "coolstep" if xdg else Path("/tmp") / f"coolstep-{os.getuid()}"
     sub.mkdir(parents=True, exist_ok=True, mode=0o700)
     return sub
 
@@ -136,10 +134,8 @@ class Writer:
         try:
             self._mm.close()
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(self._fd)
-            except OSError:
-                pass
 
 
 def read(path: Path | None = None, retries: int = 8) -> HotState | None:

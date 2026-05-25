@@ -3,20 +3,47 @@
 > CLI для интроспекции состояния. Никогда не пишет в hardware, никогда не
 > мутирует данные.
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.2.0
+**Last synced with master:** 2026-05-23
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - → reads from → `core/store.py`, `adapters/collectors/`
 
 ## Subcommands
 
+Discovery / live view:
+
 | Command | Что делает |
 |---|---|
-| `coolstep adapters` | Discovery probe — видит ли система collectors |
-| `coolstep tail --ticks N --period S` | N tick'ов live с прямым sample (без store) |
-| `coolstep stats --since 24h` | Aggregate stats из store (frames, span, temp range, throttle) |
-| `coolstep export --since 24h --format csv|json --out -` | Export shortcut columns в csv/json |
+| `coolstep adapters [--detailed] [--json]` | Discovery probe — видит ли система collectors + costs |
+| `coolstep tail [-n N] [--period S]` | N tick'ов live с прямым sample (без store) |
+| `coolstep compat [--json] [--install-plan] [--facet FACET] [--manifest]` | Platform report — что активировалось, что отсутствует, как чинить |
+
+Health / diagnostics:
+
+| Command | Что делает |
+|---|---|
+| `coolstep doctor [--json]` | 9 структурированных checks (incl. headless `systemd_session` since 2026-05-23) |
+| `coolstep drift` | 7 drift indicators (модель устарела) |
+| `coolstep efficiency [--since 7d]` | `work_per_degree` sweet spot + knee |
+| `coolstep history [--since 24h] [--json]` | Append-only timeline incidents/mode-switches/calibration events |
+
+Store / export:
+
+| Command | Что делает |
+|---|---|
+| `coolstep stats [--since 24h]` | Aggregate stats (frames, span, temp range, throttle) |
+| `coolstep export [--since] [--format csv\|json] [--out -]` | Shortcut columns в csv/json (alias `export-telemetry`) |
+| `coolstep export-profile [--out -]` | Dump текущего workload-profile config |
+| `coolstep import-profile <path> [--dry-run]` | Apply profile config с validation gate |
+
+Install / introspection (write-able только в `~/.config/`):
+
+| Command | Что делает |
+|---|---|
+| `coolstep install-units [--force]` | Drop systemd-user unit files (pipx/pip путь) |
+| `coolstep predict-debug [--bucket] [--top N] [--json]` | Inspect residual-bank state per-bucket |
+| `coolstep predict-replay` | Replay residual log → predicted vs actual trace |
 
 ## Invariants
 

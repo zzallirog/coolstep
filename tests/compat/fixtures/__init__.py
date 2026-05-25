@@ -15,10 +15,10 @@ upstream docs) for representative hardware. Bug-case overlays in
 
 from tests.compat.fixtures._loader import (
     Snapshot,
-    fake_platform,
-    load_snapshot,
-    list_snapshots,
     apply_overlay,
+    fake_platform,
+    list_snapshots,
+    load_snapshot,
 )
 
 __all__ = [

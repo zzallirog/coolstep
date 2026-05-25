@@ -4,7 +4,7 @@
 > long-lived артефакт.
 
 **Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Last synced with master:** 2026-05-25
 **Connectors:**
 - ↑ master → `../CLAUDE.md`
 - ← rendered by → `dashboard/server.py:/api/stack-rationale` (для stack-decisions.md)

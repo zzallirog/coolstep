@@ -425,7 +425,4 @@ def is_finite_curve(anchors: list[Anchor]) -> bool:
     """Sanity guard — paranoid check against NaN/inf in case a policy
     misbehaves (e.g. divides by zero on a degenerate context). Used by
     the actuator as a pre-apply gate; on False, fall back to base."""
-    for t, p in anchors:
-        if not (math.isfinite(t) and math.isfinite(p)):
-            return False
-    return True
+    return all(math.isfinite(t) and math.isfinite(p) for t, p in anchors)

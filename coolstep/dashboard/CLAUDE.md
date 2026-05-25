@@ -2,8 +2,8 @@
 
 > FastAPI бэкенд + frontend artifacts. Default port :18889 (атриум-стиль).
 
-**Module version:** 0.1.1
-**Last synced with master:** 2026-05-03
+**Module version:** 0.2.0
+**Last synced with master:** 2026-05-25
 **Connectors:**
 - ↑ package → `../CLAUDE.md`
 - → reads from → `core/store.py`, `core/calibration.py`, `adapters/collectors/`
@@ -42,7 +42,6 @@ dashboard/
 | `/api/ml-state` | last predictor snapshot | data/ml-state.json |
 | `/api/adapters` | live discovery + costs | adapters/collectors discover() |
 | `/api/stack-rationale` | parsed ADRs | docs/stack-decisions.md regex |
-| `/api/sse/telemetry` | SSE live stream (1Hz poll) | sqlite latest row |
 | `/api/discoveries` | Zabbix-LLD signal manifest | aggregated collectors[*].signals() |
 | `/api/neighbours` | KNN top-K snapshot from ml-state.json | persisted by daemon |
 | `/api/actuator-journal` | Flat timeline of recent actuator apply()/dry-run | actuators[*].journal() |
@@ -50,14 +49,30 @@ dashboard/
 | `/api/stress-runs` | Per-run summary tail from bench/gc.py (`{runs:[…], count:N}`) | `bench/runs/index.json` (repo root, not COOLSTEP_HOME) |
 | `/api/predictor-breakdown` | Final throttle_prob + features + server-recomputed `trajectory_prob_estimate` (mirrors `predictor.py:_trajectory_signal` thresholds) | `data/ml-state.json` |
 | `/api/reliability` | Daemon reliability snapshot: `uptime_sec`, `restart_count`, `last_crash` (`{ts,kind,age_sec}` or null), `mtbf_sec`. | `systemctl --user show coolstep-collector` (`ActiveEnterTimestampMonotonic` + `NRestarts`) + `data/last-crash-recovery.json` |
+| `/api/predictor-cockpit` | Cockpit-tile feed: spike-active, dual err pills (15m/30s), bucket strip, paired metrics | `data/ml-state.json` + residual bank |
+| `/api/hot` | Live "hot now" signals (top contributors to throttle_prob right now) | in-memory predictor state |
+| `/api/incidents` + `/api/incidents/{ts}/similar` | Incident archive + multi-angle similarity neighbours | `data/incidents.jsonl` |
+| `/api/event-segments` | Focus / load_jump / plateau segments (P2.5 event-segmentation) | in-memory segmenter |
+| `/api/throttle-events` | Throttle FSM events timeline | `data/throttle-events.jsonl` |
+| `/api/drift` | Seven drift indicators (model has gone stale) | `core.drift.evaluate` |
+| `/api/efficiency` + `/api/efficiency-table` | `work_per_degree` curve + stable-run analyser table | `data/efficiency_table.jsonl` |
+| `/api/mode` (GET) + `/api/mode/cool` / `/api/mode/quiet` / `/api/mode/off` (POST) | Active operational mode + transitions | runtime-state.json + journal |
+| `/api/profile` | Workload profile state (CODE / RENDER / GAME / BROWSER / IDLE / OTHER) | in-memory resolver |
+| `/api/crash-recovery` | Last crash recovery event detail | `data/last-crash-recovery.json` |
+| `/api/self` | Dashboard self-introspection (version, uptime, route count) | constants |
+| `/api/self-monitor` | Per-route latency ring (p50/p95/p99/samples) — middleware-tracked | in-memory `_ROUTE_LATENCY_RING` |
+| `/api/debug/heap` + `/api/debug/trim` | Memory introspection + manual gc trigger (debug only) | runtime gc/tracemalloc |
 
 ## Invariants
 
 - **Read-only по отношению к store.** Dashboard никогда не пишет в sqlite.
 - **No state in process.** Все данные либо из store, либо из ml-state.json,
   либо из live discovery. Перезапуск сервера не теряет ничего.
-- **SSE simpler than WebSocket** (см. ADR-008). Никогда не upgrade'аем
-  /api/sse/* на WS без явной причины.
+- **Polling, not push** (balance-plan IV, 2026-05-14). `/api/sse/telemetry`
+  был удалён — long-lived starlette streams удерживали парсенные frames
+  в памяти и тянули RSS на ~2.7 GB за 2 мин. Dashboard теперь поллит
+  `/api/telemetry/latest` каждую секунду; ADR-008 (SSE > WS) формально
+  superseded для этого route.
 - **Static dir mount только если существует.** Сервер должен подниматься без
   static/ (для headless smoke tests).
 - **TestClient через `create_app()` factory.** Не использовать singleton

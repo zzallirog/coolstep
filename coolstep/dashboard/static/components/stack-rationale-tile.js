@@ -1,6 +1,8 @@
 import { LitElement, html, css, fetchJson, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class StackRationaleTile extends LitElement {
+  static get priority() { return 'lazy'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -27,9 +29,17 @@ export class StackRationaleTile extends LitElement {
     this.adrs = [];
   }
 
-  async connectedCallback() {
+  connectedCallback() {
     super.connectedCallback();
-    const data = await fetchJson('/api/stack-rationale', { adrs: [] });
+    orchestrator.register('stack-rationale-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  async _mount() {
+    const data = await orchestrator.fetchJson('/api/stack-rationale', { adrs: [] });
     this.adrs = data.adrs || [];
   }
 

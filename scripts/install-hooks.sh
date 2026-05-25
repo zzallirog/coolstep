@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install coolstep's pre-commit hook into .git/hooks/pre-commit.
-# Idempotent: re-runs replace the symlink.
+# Install coolstep's git hooks (pre-commit + pre-push). Idempotent —
+# re-runs replace the symlinks.
 
 set -euo pipefail
 
@@ -13,7 +13,14 @@ if ! [ -d "$HOOKS_DIR" ]; then
 fi
 
 mkdir -p "$HOOKS_DIR"
-# Symlink instead of copy so updates to scripts/pre-commit.sh are picked up live.
-ln -sf "$REPO_ROOT/scripts/pre-commit.sh" "$HOOKS_DIR/pre-commit"
-chmod +x "$HOOKS_DIR/pre-commit"
-echo "installed: $HOOKS_DIR/pre-commit → $REPO_ROOT/scripts/pre-commit.sh"
+
+# Symlink instead of copy so updates to the scripts are picked up live.
+for hook in pre-commit pre-push; do
+    src="$REPO_ROOT/scripts/${hook}.sh"
+    dst="$HOOKS_DIR/$hook"
+    if [ -e "$src" ]; then
+        ln -sf "$src" "$dst"
+        chmod +x "$dst"
+        echo "installed: $dst → $src"
+    fi
+done

@@ -7,6 +7,7 @@ is not installed (the dep lives in the optional `ml` extras).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -150,6 +151,87 @@ def test_ensure_capacity_grows_index_past_initial(tmp_path: Path) -> None:
         # All vectors queryable after grow.
         res = store.query(_vec(1.0, 0.0, 0.0, 0.0), top_k=9, labeled_only=False)
         assert len(res) == 9
+    finally:
+        store.close()
+
+
+def test_add_reopens_db_after_persist_dir_swap(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Simulates the `embedder_refit.refit_and_swap` orphan-fd bug.
+
+    After the daemon's HnswStore opens meta.sqlite, `refit_and_swap` does
+    `live → live.backup`, `staging → live`, then `rmtree(live.backup)` on
+    the next refit. The cached sqlite3 connection still points at the now
+    deleted inode. Writes start returning SQLITE_READONLY because the
+    rollback journal cannot be created in the vanished parent dir.
+
+    `add()` must detect the inode mismatch via `_ensure_db_live()`,
+    reopen against the new inode, and successfully insert — without
+    logging "readonly database".
+    """
+    live = tmp_path / "hnsw"
+    store = HnswStore(persist_dir=live, dim=4, initial_capacity=16)
+    assert store.discover()
+    try:
+        store.add(1.0, _vec(1, 0, 0, 0), {"was_hot_in_30s": 1, "k": "alpha"})
+        assert store.count() == 1
+        original_inode = store._db_inode
+        assert original_inode is not None
+
+        # Simulate refit_and_swap mid-state: the live dir is renamed away,
+        # then replaced by a fresh empty dir at the same path. Touch a
+        # placeholder meta.sqlite to mimic staging being promoted to live.
+        backup = tmp_path / "hnsw.backup"
+        live.rename(backup)
+        live.mkdir()
+        (live / "meta.sqlite").touch()
+        new_inode = (live / "meta.sqlite").stat().st_ino
+        assert new_inode != original_inode
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="coolstep.adapters.storage.hnsw"):
+            store.add(
+                2.0,
+                _vec(0, 1, 0, 0),
+                {"was_hot_in_30s": 1, "k": "beta"},
+            )
+
+        # No readonly warning — that's the bug we're fixing.
+        readonly_msgs = [
+            r.getMessage() for r in caplog.records
+            if "readonly" in r.getMessage().lower()
+        ]
+        assert readonly_msgs == [], f"unexpected readonly warning: {readonly_msgs}"
+
+        # Inode tracking caught up to the new file.
+        assert store._db_inode == new_inode
+
+        # Insert actually landed in the new meta.sqlite (count==1 from the
+        # fresh inode, not 2 from the orphan one).
+        assert store.count() == 1
+        res = store.query(_vec(0, 1, 0, 0), top_k=5, labeled_only=False)
+        assert {round(r["ts"], 6) for r in res} == {2.0}
+    finally:
+        store.close()
+
+
+def test_add_reopens_db_when_meta_vanishes(tmp_path: Path) -> None:
+    """If meta.sqlite is unlinked mid-life (race with rmtree), `add()`
+    must reopen fresh and keep working rather than wedging on the
+    orphan fd."""
+    store = HnswStore(persist_dir=tmp_path, dim=4, initial_capacity=16)
+    assert store.discover()
+    try:
+        store.add(1.0, _vec(1, 0, 0, 0), {"was_hot_in_30s": 1})
+        # Yank the meta.sqlite file out from under the fd — the cached
+        # connection still has it mapped, but stat() on the path will fail.
+        (tmp_path / "meta.sqlite").unlink()
+
+        store.add(2.0, _vec(0, 1, 0, 0), {"was_hot_in_30s": 1, "k": "beta"})
+        # Fresh file → only the post-reopen row survives.
+        assert store.count() == 1
     finally:
         store.close()
 

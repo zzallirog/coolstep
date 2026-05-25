@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
-import pytest
-
 from coolstep.adapters.collectors.dbus_session import (
     DbusSessionCollector,
     _query_idle_time_ms,

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from coolstep.adapters.collectors.intel_i915 import IntelI915Collector, _intel_cards
 
 

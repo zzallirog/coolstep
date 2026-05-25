@@ -72,7 +72,7 @@ def _discover_domains(root: Path) -> list[_Domain]:
         # Top-level packages: intel-rapl:0, intel-rapl:1, ...
         if not pkg_dir.name.startswith("intel-rapl:") or pkg_dir.name.count(":") != 1:
             continue
-        pkg_name = (pkg_dir / "name").read_text().strip() if (pkg_dir / "name").exists() else f"package-{pkg_index}"
+        (pkg_dir / "name").read_text().strip() if (pkg_dir / "name").exists() else f"package-{pkg_index}"
         energy = pkg_dir / "energy_uj"
         max_uj_p = pkg_dir / "max_energy_range_uj"
         if energy.exists():
@@ -209,8 +209,7 @@ def make() -> RaplEnergyCollector | None:
     # /sys/class/powercap/intel-rapl tree (same powercap interface is reused
     # on modern AMD kernels). Either one alone is enough; discover() handles
     # the rest.
-    if _c is not None:
-        if not _c.hwmon_rapl and not _c.rapl_powercap:
-            return None
+    if _c is not None and not _c.hwmon_rapl and not _c.rapl_powercap:
+        return None
     collector = RaplEnergyCollector()
     return collector if collector.discover() else None

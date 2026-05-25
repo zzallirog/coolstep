@@ -3,21 +3,27 @@
 > Sinks of decisions. Action verbs → vendor commands. **Безопасность —
 > главная invariant.**
 
-**Module version:** 0.1.0
-**Last synced with master:** 2026-05-03
+**Module version:** 0.2.0
+**Last synced with master:** 2026-05-23
 **Connectors:**
 - ↑ adapters → `../CLAUDE.md`
 - ↔ peer → `../collectors/CLAUDE.md`
 - ← consumed by → `daemon.py` (через decision engine)
 
-## Active actuators (P0)
+## Active actuators (P2 — armed)
 
 | File | Verbs supported | Status |
 |---|---|---|
-| `readonly.py` | ALL (logs intent only) | ✅ default actuator |
+| `readonly.py` | ALL (logs intent only) | ✅ default, always first in router |
+| `notify_send.py` | NOTIFY_USER | ✅ libnotify wrapper, DBus session required |
+| `asusctl_fan_curve.py` | RAMP_COOLING | ✅ asusctl wrap, ASUS laptops |
+| `ryzenadj_cap.py` | CAP_BOOST | ✅ ryzenadj wrap, AMD Ryzen mobile |
+| `epp_shift.py` | SHIFT_POWER_ENVELOPE | ✅ amd-pstate-epp / intel_pstate EPP |
+| `game_mode_optimizer.py` | DEFER_WORKLOAD | ✅ co-operative bias when game-mode active |
 
-P0 — **только readonly**. Реальные hardware-actions появятся в P2 после ML
-predictor стабилизируется.
+Все hardware actuators **dry-run по умолчанию** — `apply()` пишет в actuator
+journal, но реальная команда не выполняется, пока `COOLSTEP_ACTUATOR_ENABLE=true`
+не выставлен в systemd unit и не прошли все 8 calibration gates.
 
 ## Invariants
 
