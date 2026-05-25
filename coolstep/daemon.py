@@ -784,6 +784,21 @@ class Daemon:
                     "event_segmenter: boundary reason=%s session=%s",
                     boundary.reason, boundary.new_session_id,
                 )
+                # Persist for /api/event-segments tail. Was dropped on-the-floor
+                # → dashboard showed "no segments yet" forever even when daemon
+                # logs proved boundaries fire. Same jsonl-tail pattern as
+                # incidents.jsonl. Volume is low (rare events, ~10s/hour).
+                try:
+                    seg_path = _coolstep_home() / "segments.jsonl"
+                    with open(seg_path, "a") as f:
+                        f.write(json.dumps({
+                            "ts": time.time(),
+                            "reason": boundary.reason,
+                            "session_id": boundary.new_session_id,
+                            "prev_session_id": boundary.prev_session_id,
+                        }) + "\n")
+                except OSError as _exc:
+                    pass  # best-effort; daemon must not crash on disk pressure
                 # P2.9.7 fix (2026-05-13): residual bank holds per-bucket
                 # EWMA bias from the *previous* workload.  When a load_jump
                 # opens a new session, that bias is stale — feature vectors

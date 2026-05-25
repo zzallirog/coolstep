@@ -81,7 +81,12 @@ function _startTelemetryPoller() {
       const r = await _budgetedFetch('/api/telemetry/latest', { cache: 'no-store' }, PRIORITY.critical);
       if (!r.ok) return;
       const data = await r.json();
-      if (!data || data.ts === _telemetryLastTs) return;
+      if (!data) return;
+      // Dedup REMOVED 2026-05-25: server has 1s cache TTL + poller fires 1Hz +
+      // collector at 1.5Hz creates phase aliasing → multiple consecutive polls
+      // returned same cached body with same ts → emit suppressed → tiles froze
+      // for 6-7s while client-side age timer ticked independently 30s→36s.
+      // Idempotent re-render in subscribers is cheap; let every poll emit.
       _telemetryLastTs = data.ts;
       for (const cb of _telemetrySubscribers) {
         try { cb(data); } catch (_e) { /* tile error, don't break others */ }

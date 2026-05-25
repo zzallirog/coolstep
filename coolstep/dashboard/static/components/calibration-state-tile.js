@@ -72,7 +72,23 @@ export class CalibrationStateTile extends LitElement {
   }
 
   render() {
-    const r = this.report || { gates: {}, ready: false };
+    // Loading skeleton: report=null = first fetch in flight (cold-miss is 16s
+    // on 300k+ frame stores). Showing "0/—" during cold fetch read as broken.
+    if (this.report === null) {
+      return renderFrame({
+        title: 'Calibration state',
+        meta: null,
+        body: html`
+          <div class="hero">
+            <div class="col">
+              <span class="eyebrow cat">gates passed</span>
+              <span class="metric cat">…<small>loading</small></span>
+            </div>
+          </div>
+        `,
+      });
+    }
+    const r = this.report;
     const gates = Object.entries(r.gates);
     const passed = gates.filter(([, g]) => g.passed).length;
     const total = gates.length;

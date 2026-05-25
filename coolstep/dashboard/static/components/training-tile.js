@@ -3,7 +3,10 @@ import { orchestrator } from './_orchestrator.js';
 
 /** Replaces legacy «Training what+how» card. Reads /api/ml-state. */
 export class TrainingTile extends LitElement {
-  static get priority() { return 'lazy'; }
+  // 'normal' so the tile mounts immediately without IntersectionObserver delay —
+  // training/ml-state is the operator's primary tick counter; lazy mount caused
+  // 5-7s gaps where tick appeared frozen during initial dashboard load.
+  static get priority() { return 'normal'; }
 
   static styles = [
     tileBaseStyles,
@@ -65,7 +68,7 @@ export class TrainingTile extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     orchestrator.register('training-tile', {
-      priority: 'lazy',
+      priority: 'normal',
       element: this,
       mountFn: () => this._mount(),
     });
@@ -73,7 +76,8 @@ export class TrainingTile extends LitElement {
 
   _mount() {
     this._refresh();
-    this._timer = setInterval(() => this._refresh(), 5000);
+    // 2s (was 5s) — operator's tick counter; 5s lag felt frozen on screencast.
+    this._timer = setInterval(() => this._refresh(), 2000);
   }
 
   disconnectedCallback() {

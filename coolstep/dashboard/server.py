@@ -374,6 +374,12 @@ async def _lifespan(app: FastAPI):
         asyncio.create_task(asyncio.to_thread(_warm_imports))
         asyncio.create_task(asyncio.to_thread(_warm_adapters_cache))
         asyncio.create_task(asyncio.to_thread(_warm_discoveries_cache))
+        # Calibration warmed AFTER the cheap warms — it's the 16s SQLite scan,
+        # but skipping it means the first calibration-state-tile fetch eats 16s
+        # cold-miss (loading skeleton hides it, but TTL=30s means most users
+        # still pay it once). 10s delay = uvicorn fully responsive first.
+        await asyncio.sleep(8.0)
+        asyncio.create_task(asyncio.to_thread(_warm_calibration_cache))
     prewarm_task = asyncio.create_task(_delayed_prewarm())
     try:
         yield
@@ -1268,14 +1274,18 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
 
         # Thresholds: kept in-body so the frontend renders the bar correctly
         # without a second round-trip; also documents what each trigger means.
+        # Thresholds recalibrated 2026-05-25 against real prod baseline:
+        # collector uses ~79% memory + ~64MB swap + ~1-2% PSI IO at IDLE.
+        # Prior values (80% / 1MB / 0.1%) tripped 4 false-positive TRIGGER
+        # alarms on a healthy system → operator alert fatigue.
         THRESHOLDS = {
             "busy_ratio_p95": 1.0,           # tick exceeds period
             "slow_tick_count": 3,            # >=3 slow ticks in 60 = chronic
-            "memory_used_pct": 80.0,         # cgroup memory.current vs max
-            "memory_swap_mb": 1,             # >=1MB swap = thrash incoming
-            "psi_some_avg10": 0.10,          # 10% pressure sustained
-            "ml_state_age_sec": 5.0,         # UI gap user complained about (AGE 8s)
-            "restart_count_delta": 1,        # any restart since last cache window
+            "memory_used_pct": 92.0,         # 80→92: 79% idle is normal
+            "memory_swap_mb": 200,           # 1→200: 64MB steady is expected
+            "psi_some_avg10": 5.0,           # 0.1→5.0: sqlite-WAL floor ~1-2%
+            "ml_state_age_sec": 10.0,        # 5→10: poll dedup window
+            "restart_count_delta": 1,
         }
 
         def _work() -> dict:
@@ -1626,15 +1636,41 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
 
     @app.get("/api/event-segments")
     async def get_event_segments(since: str = "24h", limit: int = 50) -> JSONResponse:
-        """Recent session boundaries emitted by EventSegmenter.
+        """Recent session boundaries from `data/segments.jsonl` (daemon-written)."""
+        cached, put = _cached_endpoint(f"event_segments:{since}:{limit}", 5.0)
+        if cached is not None:
+            return JSONResponse(cached)
 
-        Today the segmenter lives in-memory on the daemon and doesn't
-        persist boundaries — so this endpoint is a placeholder that
-        returns an empty list. The dashboard tile tolerates the empty
-        response. Once we wire a `data/segments.jsonl` (TODO), this
-        endpoint will read it the same way `/api/incidents` reads
-        `incidents.jsonl`."""
-        return JSONResponse({"count": 0, "segments": []})
+        def _work() -> dict:
+            path = _coolstep_home() / "segments.jsonl"
+            if not path.exists():
+                return {"count": 0, "segments": []}
+            # since=24h|7d|... → seconds cutoff
+            mult = {"h": 3600, "d": 86400, "m": 60}
+            try:
+                cutoff = time.time() - int(since[:-1]) * mult.get(since[-1], 3600)
+            except (ValueError, KeyError):
+                cutoff = time.time() - 24 * 3600
+            rows: list[dict] = []
+            try:
+                with open(path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if float(r.get("ts", 0)) >= cutoff:
+                            rows.append(r)
+            except OSError:
+                return {"count": 0, "segments": []}
+            rows = rows[-limit:]
+            return {"count": len(rows), "segments": rows}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/efficiency-table")
     async def get_efficiency_table() -> JSONResponse:
