@@ -22,7 +22,7 @@ loop = 1 Hz (`coolstep-collector.service --period 1.0`).
 | Host | Topology | median | p95 | Source |
 |---|---|---|---|---|
 | ASUS TUF A15 (Ryzen 7940HS, 16 logical) | k10temp (4 inputs) + asus fans + nvme | ~16 ms | — | `docs/p2.5-rollup.md` |
-| ex44 server (Intel i5-13500, 20 logical) | coretemp (15 inputs) + 2× nvme + acpitz + asus | 19.7 ms | 20.5 ms | profiled 2026-05-23 (issue #5) |
+| Intel i5-13500 server (20 logical) | coretemp (15 inputs) + 2× nvme + acpitz + asus | 19.7 ms | 20.5 ms | profiled 2026-05-23 (issue #5) |
 
 Bimodal distribution on Intel comes from selective-refresh schedule
 (`FREQ_REFRESH_TICKS=3` + `VOLTAGE_REFRESH_TICKS=5`): «fast» ticks ~12 ms,
