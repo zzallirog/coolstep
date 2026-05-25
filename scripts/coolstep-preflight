@@ -1,0 +1,121 @@
+#!/bin/sh
+# coolstep-preflight — boot dashboard on alt port, curl every API route,
+# report timing + status, exit 1 if any route returns non-200.
+#
+# Usage:
+#   ./scripts/coolstep-preflight
+#
+# Env overrides:
+#   COOLSTEP_PREFLIGHT_PORT  alt port (default 18890, never touches prod 18889)
+#   COOLSTEP_HOME            data dir (default ~/coolstep/data)
+#   COOLSTEP_PREFLIGHT_LOG   server log file (default /tmp/coolstep-preflight-$$.log)
+#
+# POSIX sh — no bash arrays, no [[ ]], no $(()) with float, no local.
+# Requires: python3 in PATH with coolstep installed, curl, seq or awk.
+
+set -eu
+
+PORT="${COOLSTEP_PREFLIGHT_PORT:-18890}"
+DATA="${COOLSTEP_HOME:-$HOME/coolstep/data}"
+LOG="${COOLSTEP_PREFLIGHT_LOG:-/tmp/coolstep-preflight-$$.log}"
+
+# Guard: refuse to use prod port
+if [ "$PORT" = "18889" ]; then
+    printf 'preflight: refusing to use production port 18889\n' >&2
+    exit 2
+fi
+
+printf 'coolstep-preflight: port=%s data=%s log=%s\n' "$PORT" "$DATA" "$LOG" >&2
+
+# Boot dashboard against existing data dir, on alt port, background
+COOLSTEP_HOME="$DATA" python3 -m coolstep.dashboard.server \
+    --host 127.0.0.1 --port "$PORT" \
+    > "$LOG" 2>&1 &
+PID=$!
+
+cleanup() {
+    kill "$PID" 2>/dev/null || true
+    rm -f "$LOG"
+}
+trap cleanup EXIT INT TERM
+
+BASE="http://127.0.0.1:$PORT"
+
+# Wait up to 10s for /api/health (50 × 0.2s)
+i=1
+while [ "$i" -le 50 ]; do
+    if curl -sf "$BASE/api/health" > /dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+    i=$((i + 1))
+done
+
+if ! curl -sf "$BASE/api/health" > /dev/null 2>&1; then
+    printf 'preflight: dashboard did not start within 10s\n' >&2
+    tail -20 "$LOG" >&2
+    exit 1
+fi
+
+printf 'preflight: dashboard started (pid=%s)\n\n' "$PID" >&2
+
+# Per-route timed curls. Output: route  elapsed_ms  http_status
+# Routes match BUDGETS_MS in test_endpoint_budget.py (same canonical list).
+fail=0
+
+# Measure one route. Args: $1=route_path_with_optional_qs
+check_route() {
+    route="$1"
+    url="$BASE$route"
+    t0=$(date +%s%N 2>/dev/null || date +%s)
+    code=$(curl -sf -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || printf '000')
+    t1=$(date +%s%N 2>/dev/null || date +%s)
+    # Nanosecond-capable date (GNU): %N gives ns → ms via integer divide
+    # Fallback (BusyBox/macOS): %s only → ms resolution = 0 or 1000
+    if printf '%s' "$t0" | grep -qE '^[0-9]{18,}$'; then
+        ms=$(( (t1 - t0) / 1000000 ))
+    else
+        ms=$(( (t1 - t0) * 1000 ))
+    fi
+    printf '%-55s %6d ms  %s\n' "$route" "$ms" "$code"
+    if [ "$code" != "200" ]; then
+        fail=1
+    fi
+}
+
+check_route "/api/health"
+check_route "/api/telemetry/latest"
+check_route "/api/telemetry/range?since=15m"
+check_route "/api/ml-state"
+check_route "/api/calibration"
+check_route "/api/adapters"
+check_route "/api/efficiency?since=7d"
+check_route "/api/drift"
+check_route "/api/neighbours"
+check_route "/api/predictor-breakdown"
+check_route "/api/predictor-cockpit?scope_s=60"
+check_route "/api/throttle-events?since=7d"
+check_route "/api/discoveries"
+check_route "/api/stack-rationale"
+check_route "/api/actuator-journal?limit=50"
+check_route "/api/crash-recovery"
+check_route "/api/reliability"
+check_route "/api/hot"
+check_route "/api/self"
+check_route "/api/stress-state"
+check_route "/api/stress-runs"
+check_route "/api/debug/trim"
+check_route "/api/mode"
+check_route "/api/profile"
+check_route "/api/event-segments?since=24h"
+check_route "/api/efficiency-table"
+check_route "/api/incidents?since=7d&limit=50"
+
+printf '\n'
+if [ "$fail" -eq 0 ]; then
+    printf 'preflight: all routes OK\n'
+else
+    printf 'preflight: one or more routes returned non-200\n' >&2
+fi
+
+exit "$fail"

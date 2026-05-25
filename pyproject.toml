@@ -114,4 +114,5 @@ addopts = "-q --tb=short --strict-markers"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "slow: tests known to be slow or unreliable (e.g. chromadb integration on Python 3.14)",
+    "perf: latency budget tests — run separately from unit suite (pytest -m perf)",
 ]
