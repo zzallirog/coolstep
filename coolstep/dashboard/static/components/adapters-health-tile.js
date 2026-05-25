@@ -1,6 +1,9 @@
 import { LitElement, html, css, fetchJson, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class AdaptersHealthTile extends LitElement {
+  static get priority() { return 'normal'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -33,6 +36,14 @@ export class AdaptersHealthTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('adapters-health-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -43,7 +54,7 @@ export class AdaptersHealthTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/adapters', null);
+    const data = await orchestrator.fetchJson('/api/adapters', null);
     if (!data) return;  // hold prior on transient failure — avoid 0/0 flash
     this.collectors = data.collectors || [];
     this.actuators = data.actuators || [];

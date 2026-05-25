@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 import { LangController } from '../i18n/lang-store.js';
 
 /** Predictor breakdown — splits the final throttle_prob into its two
@@ -14,6 +15,8 @@ import { LangController } from '../i18n/lang-store.js';
  *
  * Polling 5 s — same cadence as neighbours-tile to track latest ml-state.json. */
 export class PredictorBreakdownTile extends LitElement {
+  static get priority() { return 'lazy'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -122,6 +125,14 @@ export class PredictorBreakdownTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('predictor-breakdown-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 5000);
   }
@@ -133,7 +144,7 @@ export class PredictorBreakdownTile extends LitElement {
 
   async _refresh() {
     try {
-      const r = await fetch('/api/predictor-breakdown', { cache: 'no-store' });
+      const r = await orchestrator.fetch('/api/predictor-breakdown', { cache: 'no-store' });
       if (r.status === 404) {
         this.state = null;
         this.error = 'no-ml-state';

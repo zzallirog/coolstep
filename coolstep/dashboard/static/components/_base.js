@@ -5,7 +5,7 @@
 // renderFrame({title, eyebrow?, meta?, body}). Body slot uses the .hero /
 // .eyebrow / .mini-grid / .meter / .stat-pill utility classes below.
 
-import { LitElement, html, css, nothing } from 'https://esm.sh/lit@3';
+import { LitElement, html, css, nothing } from '/static/vendor/lit.min.js';
 
 export { LitElement, html, css, nothing };
 

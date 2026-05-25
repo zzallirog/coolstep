@@ -1,7 +1,10 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 import { LangController } from '../i18n/lang-store.js';
 
 export class StressRunsTile extends LitElement {
+  static get priority() { return 'normal'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -75,6 +78,14 @@ export class StressRunsTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('stress-runs-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 60000);
   }
@@ -85,7 +96,7 @@ export class StressRunsTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/stress-runs', { runs: [], count: 0 });
+    const data = await orchestrator.fetchJson('/api/stress-runs', { runs: [], count: 0 });
     this.runs = Array.isArray(data.runs) ? data.runs : [];
     this.count = typeof data.count === 'number' ? data.count : 0;
   }

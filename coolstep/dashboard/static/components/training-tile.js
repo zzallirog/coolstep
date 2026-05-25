@@ -1,7 +1,10 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Replaces legacy «Training what+how» card. Reads /api/ml-state. */
 export class TrainingTile extends LitElement {
+  static get priority() { return 'lazy'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -61,6 +64,14 @@ export class TrainingTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('training-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 5000);
   }
@@ -71,7 +82,7 @@ export class TrainingTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/ml-state', null);
+    const data = await orchestrator.fetchJson('/api/ml-state', null);
     if (!data || data.error) {
       // Hold any prior state so a transient blip doesn't blank the tile.
       if (!this.state) {

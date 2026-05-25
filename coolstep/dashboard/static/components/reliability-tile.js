@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Daemon reliability surface.
  *
@@ -32,6 +33,8 @@ function _t(host, key, fallback) {
 }
 
 export class ReliabilityTile extends LitElement {
+  static get priority() { return 'normal'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -57,6 +60,14 @@ export class ReliabilityTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('reliability-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -67,7 +78,7 @@ export class ReliabilityTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson(
+    const data = await orchestrator.fetchJson(
       '/api/reliability',
       { uptime_sec: null, restart_count: null, last_crash: null, mtbf_sec: null },
     );

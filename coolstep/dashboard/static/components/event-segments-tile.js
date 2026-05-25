@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame, nothing } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 import { LangController } from '../i18n/lang-store.js';
 
 /** <event-segments-tile>
@@ -16,6 +17,8 @@ import { LangController } from '../i18n/lang-store.js';
  *  from incidents-tile.
  */
 export class EventSegmentsTile extends LitElement {
+  static get priority() { return 'lazy'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -60,6 +63,14 @@ export class EventSegmentsTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('event-segments-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -73,7 +84,7 @@ export class EventSegmentsTile extends LitElement {
     // Non-blocking — if the endpoint isn't wired yet (orchestrator
     // owns that work), fetchJson returns null and we keep the empty
     // state visible. No console noise, no error strip.
-    const j = await fetchJson('/api/event-segments?since=24h');
+    const j = await orchestrator.fetchJson('/api/event-segments?since=24h');
     if (j && Array.isArray(j.segments)) {
       this.segments = j.segments;
       this.error = null;
