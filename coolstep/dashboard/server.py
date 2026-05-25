@@ -19,9 +19,11 @@ no SSE (removed 2026-05-14, balance-plan step IV).
 from __future__ import annotations
 
 import asyncio
+import collections
 import ctypes
 import gc
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -29,6 +31,8 @@ import sys
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 import click
 from fastapi import FastAPI, Request
@@ -76,6 +80,13 @@ _discoveries_cache: dict[str, object] = {"ts": 0.0, "body": None}
 # offload makes the worker non-blocking, which is the whole fix.
 _GENERIC_CACHES: dict[str, dict[str, object]] = {}
 
+# Per-route latency ring: 60 samples per route. Written by middleware on the
+# event loop (single writer), read by /api/self-monitor (single reader).
+# collections.deque is thread-safe for append+popleft, but we're single-loop
+# so no lock is needed at all.
+_ROUTE_LATENCY_RING: dict[str, collections.deque] = {}
+_ROUTE_RING_SIZE = 60
+
 
 def _cached_endpoint(key: str, ttl_sec: float):
     """Tiny helper to mirror the inline (_calibration_cache /
@@ -108,6 +119,14 @@ def _reset_endpoint_caches() -> None:
     _calibration_cache["body"] = None
     _discoveries_cache["ts"] = 0.0
     _discoveries_cache["body"] = None
+    _ROUTE_LATENCY_RING.clear()
+
+
+def _percentile(data: list[float], pct: float) -> float:
+    """Return the pct-th percentile (0-100) of sorted data. Caller must
+    ensure len(data) >= 1."""
+    idx = max(0, min(len(data) - 1, int(len(data) * pct / 100.0)))
+    return data[idx]
 
 
 def _coolstep_home() -> Path:
@@ -238,15 +257,104 @@ async def _periodic_malloc_trim() -> None:
             continue
 
 
+def _warm_imports() -> None:
+    """Pre-import hot modules so first handler invocation doesn't pay
+    module-import cost synchronously on the event loop. Runs in a thread
+    so import lock delays don't block startup."""
+    try:
+        from coolstep.core import calibration  # noqa: F401
+    except Exception as exc:
+        log.warning("pre-warm: calibration import failed: %s", exc)
+    try:
+        from coolstep.core import efficiency  # noqa: F401
+    except Exception as exc:
+        log.warning("pre-warm: efficiency import failed: %s", exc)
+    try:
+        from coolstep.core import drift  # noqa: F401
+    except Exception as exc:
+        log.warning("pre-warm: drift import failed: %s", exc)
+    try:
+        from coolstep.core import incidents  # noqa: F401
+    except Exception as exc:
+        log.warning("pre-warm: incidents import failed: %s", exc)
+    try:
+        from coolstep.core import residual_log  # noqa: F401
+    except Exception as exc:
+        log.warning("pre-warm: residual_log import failed: %s", exc)
+
+
+def _warm_adapters_cache() -> None:
+    """Pre-seed the adapters cache so first browser open is a cache hit.
+    Failures are logged but must not propagate — pre-warm is best-effort."""
+    try:
+        collectors = discover_collectors()
+        col_result = []
+        for c in collectors:
+            sample: dict = {}
+            with suppress(Exception):
+                sample = c.sample()
+            if sample:
+                _collector_last_nonempty_at[c.name] = time.time()
+            cost = c.cost()
+            col_result.append({
+                "name": c.name,
+                "discovered": True,
+                "sample_us": cost.sample_us,
+                "last_nonempty_at": _collector_last_nonempty_at.get(c.name),
+                "rss_kb": cost.rss_kb,
+                "signal_count": len(c.signals()) if hasattr(c, "signals") else 0,
+            })
+        from coolstep.adapters.actuators import discover as _disc_act
+        from coolstep.core.schema import ActionVerb
+        actuators = _disc_act()
+        act_result = []
+        for a in actuators:
+            supported = [v.value for v in ActionVerb if a.supports(v)]
+            act_result.append({
+                "name": a.name,
+                "discovered": True,
+                "supports": supported,
+            })
+        body = {"collectors": col_result, "actuators": act_result}
+        _adapters_cache["ts"] = time.monotonic()
+        _adapters_cache["body"] = body
+    except Exception as exc:
+        log.warning("pre-warm adapters: %s", exc)
+
+
+def _warm_discoveries_cache() -> None:
+    """Pre-seed the discoveries cache."""
+    try:
+        from dataclasses import asdict
+        collectors = discover_collectors()
+        manifest: list[dict] = []
+        for c in collectors:
+            if not hasattr(c, "signals"):
+                continue
+            for sig in c.signals():
+                row = asdict(sig)
+                row["collector"] = c.name
+                manifest.append(row)
+        body: dict = {"signals": manifest, "total": len(manifest)}
+        _discoveries_cache["ts"] = time.monotonic()
+        _discoveries_cache["body"] = body
+    except Exception as exc:
+        log.warning("pre-warm discoveries: %s", exc)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    task = asyncio.create_task(_periodic_malloc_trim())
+    trim_task = asyncio.create_task(_periodic_malloc_trim())
+    # Pre-warm: background tasks — failures must not block startup or lifespan.
+    asyncio.create_task(asyncio.to_thread(_warm_imports))
+    asyncio.create_task(asyncio.to_thread(_warm_adapters_cache))
+    asyncio.create_task(asyncio.to_thread(_warm_discoveries_cache))
     try:
         yield
     finally:
-        task.cancel()
+        trim_task.cancel()
         with suppress(BaseException):
-            await task
+            await trim_task
 
 
 def create_app(
@@ -269,6 +377,29 @@ def create_app(
         host_allowlist=host_allowlist or DEFAULT_HOST_ALLOWLIST,
         origin_allowlist=origin_allowlist or build_origin_allowlist("127.0.0.1", 18889),
     )
+
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class _LatencyMiddleware(BaseHTTPMiddleware):
+        """Record per-route response time (ms) into a bounded ring of 60 samples.
+        Written on the event loop — no lock needed (single-writer, deque append
+        is atomic for CPython GIL). Reader is /api/self-monitor."""
+
+        async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
+            t0 = time.perf_counter()
+            response = await call_next(request)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            route = request.url.path
+            ring = _ROUTE_LATENCY_RING.get(route)
+            if ring is None:
+                ring = collections.deque(maxlen=_ROUTE_RING_SIZE)
+                _ROUTE_LATENCY_RING[route] = ring
+            ring.append(elapsed_ms)
+            return response
+
+    app.add_middleware(_LatencyMiddleware)
+
     static_dir = _static_dir()
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -280,42 +411,64 @@ def create_app(
 
     @app.get("/api/health")
     async def health() -> JSONResponse:
-        store_p = _store_path()
-        state_p = _ml_state_path()
-        body = {
-            "daemon_seen": store_p.exists(),
-            "store_path": str(store_p),
-            "store_size_bytes": store_p.stat().st_size if store_p.exists() else 0,
-            "ml_state_seen": state_p.exists(),
-            "ml_state_age_sec": (
-                time.time() - state_p.stat().st_mtime if state_p.exists() else None
-            ),
-        }
-        return JSONResponse(body)
+        cached, put = _cached_endpoint("health", 1.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict:
+            store_p = _store_path()
+            state_p = _ml_state_path()
+            return {
+                "daemon_seen": store_p.exists(),
+                "store_path": str(store_p),
+                "store_size_bytes": store_p.stat().st_size if store_p.exists() else 0,
+                "ml_state_seen": state_p.exists(),
+                "ml_state_age_sec": (
+                    time.time() - state_p.stat().st_mtime if state_p.exists() else None
+                ),
+            }
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/telemetry/latest")
     async def telemetry_latest() -> JSONResponse:
-        path = _store_path()
-        if not path.exists():
-            return JSONResponse({"error": "no store yet"}, status_code=404)
-        conn = sqlite3.connect(path)
-        try:
-            row = conn.execute(
-                "SELECT ts, cpu_temp, cpu_power, gpu_temp, gpu_power, fan_max_rpm, "
-                "workload_label, raw_json FROM frames ORDER BY ts DESC LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-        if row is None:
+        # 1s TTL: collector writes at ~1Hz; one shared cache covers 4 polling
+        # tiles (live-telemetry + throttle-events + actuator-history + efficiency).
+        cached, put = _cached_endpoint("telemetry_latest", 1.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict | None:
+            path = _store_path()
+            if not path.exists():
+                return None
+            conn = sqlite3.connect(path)
+            try:
+                row = conn.execute(
+                    "SELECT ts, cpu_temp, cpu_power, gpu_temp, gpu_power, fan_max_rpm, "
+                    "workload_label, raw_json FROM frames ORDER BY ts DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                return None
+            cols = ("ts", "cpu_temp", "cpu_power", "gpu_temp", "gpu_power",
+                    "fan_max_rpm", "workload_label", "raw_json")
+            out = dict(zip(cols, row, strict=True))
+            if isinstance(out["raw_json"], str):
+                with suppress(json.JSONDecodeError):
+                    out["raw"] = json.loads(out["raw_json"])
+            out.pop("raw_json", None)
+            return out
+
+        body = await asyncio.to_thread(_work)
+        if body is None:
+            path = _store_path()
+            if not path.exists():
+                return JSONResponse({"error": "no store yet"}, status_code=404)
             return JSONResponse({"error": "no frames yet"}, status_code=404)
-        cols = ("ts", "cpu_temp", "cpu_power", "gpu_temp", "gpu_power",
-                "fan_max_rpm", "workload_label", "raw_json")
-        body = dict(zip(cols, row, strict=True))
-        if isinstance(body["raw_json"], str):
-            with suppress(json.JSONDecodeError):
-                body["raw"] = json.loads(body["raw_json"])
-        body.pop("raw_json", None)
-        return JSONResponse(body)
+        return JSONResponse(put(body))
 
     @app.get("/api/telemetry/range")
     async def telemetry_range(since: str = "15m", limit: int = 5000) -> JSONResponse:
@@ -338,13 +491,25 @@ def create_app(
 
     @app.get("/api/ml-state")
     async def ml_state() -> JSONResponse:
-        path = _ml_state_path()
-        if not path.exists():
+        cached, put = _cached_endpoint("ml_state", 1.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict | None:
+            path = _ml_state_path()
+            if not path.exists():
+                return None
+            try:
+                return json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"_error": str(exc)}
+
+        body = await asyncio.to_thread(_work)
+        if body is None:
             return JSONResponse({"error": "ml-state not written yet"}, status_code=404)
-        try:
-            return JSONResponse(json.loads(path.read_text()))
-        except (OSError, json.JSONDecodeError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+        if "_error" in body:
+            return JSONResponse({"error": body["_error"]}, status_code=500)
+        return JSONResponse(put(body))
 
     @app.get("/api/calibration")
     async def calibration() -> JSONResponse:
@@ -375,36 +540,38 @@ def create_app(
         if cached is not None and (now - float(_adapters_cache["ts"])) < _ADAPTERS_CACHE_SEC:
             return JSONResponse(cached)
 
-        collectors = discover_collectors()
-        col_result = []
-        for c in collectors:
-            sample = {}
-            with suppress(Exception):
-                sample = c.sample()
-            if sample:
-                _collector_last_nonempty_at[c.name] = time.time()
-            cost = c.cost()
-            col_result.append({
-                "name": c.name,
-                "discovered": True,
-                "sample_us": cost.sample_us,
-                "last_nonempty_at": _collector_last_nonempty_at.get(c.name),
-                "rss_kb": cost.rss_kb,
-                "signal_count": len(c.signals()) if hasattr(c, "signals") else 0,
-            })
-        actuators = discover_actuators()
-        act_result = []
-        for a in actuators:
+        def _build_adapters() -> dict:
             from coolstep.core.schema import ActionVerb
+            collectors = discover_collectors()
+            col_result = []
+            for c in collectors:
+                sample: dict = {}
+                with suppress(Exception):
+                    sample = c.sample()
+                if sample:
+                    _collector_last_nonempty_at[c.name] = time.time()
+                cost = c.cost()
+                col_result.append({
+                    "name": c.name,
+                    "discovered": True,
+                    "sample_us": cost.sample_us,
+                    "last_nonempty_at": _collector_last_nonempty_at.get(c.name),
+                    "rss_kb": cost.rss_kb,
+                    "signal_count": len(c.signals()) if hasattr(c, "signals") else 0,
+                })
+            actuators = discover_actuators()
+            act_result = []
+            for a in actuators:
+                supported = [v.value for v in ActionVerb if a.supports(v)]
+                act_result.append({
+                    "name": a.name,
+                    "discovered": True,
+                    "supports": supported,
+                })
+            return {"collectors": col_result, "actuators": act_result}
 
-            supported = [v.value for v in ActionVerb if a.supports(v)]
-            act_result.append({
-                "name": a.name,
-                "discovered": True,
-                "supports": supported,
-            })
-        body = {"collectors": col_result, "actuators": act_result}
-        _adapters_cache["ts"] = now
+        body = await asyncio.to_thread(_build_adapters)
+        _adapters_cache["ts"] = time.monotonic()
         _adapters_cache["body"] = body
         return JSONResponse(body)
 
@@ -448,7 +615,7 @@ def create_app(
 
     @app.get("/api/drift")
     async def drift() -> JSONResponse:
-        cached, put = _cached_endpoint("drift", 30.0)
+        cached, put = _cached_endpoint("drift", 5.0)
         if cached is not None:
             return JSONResponse(cached)  # type: ignore[arg-type]
         from coolstep.core.drift import evaluate
@@ -567,239 +734,205 @@ def create_app(
         See ADR-018.  This endpoint is read-only; all state lives in
         ml-state.json + residual-state.jsonl + sqlite frames.
         """
-        import time as _time
+        import math as _math
 
         path = _ml_state_path()
         if not path.exists():
             return JSONResponse({"error": "no ml-state"}, status_code=404)
-        try:
-            m = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
 
-        features = m.get("features", {}) or {}
-        now = _time.time()
+        scope_clamped = max(10, min(600, int(scope_s)))
 
-        # Past 60s temperature trail from sqlite frames table. The
-        # visible canvas window is ~38s (T_PAST = max(30, horizon+8));
-        # the extra 20s+ buffer keeps the polyline anchored at the left
-        # edge while the frontend's rAF pump slides X-positions left
-        # between 2 s polls (P2.9.8, operator: «график едет», 2026-05-13).
-        # Cost: ~300 floats (60s × 5Hz) per response, negligible.
-        actual_trail: list[dict[str, float]] = []
-        try:
-            db = _open_db()
-            since = now - 60.0
-            rows = db.execute(
-                "SELECT ts, cpu_temp FROM frames "
-                "WHERE ts >= ? AND cpu_temp IS NOT NULL "
-                "ORDER BY ts ASC",
-                (since,),
-            ).fetchall()
-            actual_trail = [
-                {"ts_ago": round(now - row[0], 1), "t": float(row[1])}
-                for row in rows
-            ]
-        except Exception:  # noqa: BLE001
-            actual_trail = []
+        def _work() -> dict:  # noqa: PLR0912
+            try:
+                m = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                return {"_error": str(exc)}
 
-        # Residual trail — validated predictions across the canvas window
-        # (2026-05-13: prior `tail(12)` packed 12 records from a 2.4s slice
-        # since daemon validates @5Hz; every ring stacked at the −30s
-        # canvas edge.  Now: walk a wider tail and bin by validation time
-        # (`ts_ago`) — picks one freshest record per ~2.5s bucket over the
-        # canvas T_PAST window so 12 rings span the full timeline). */
-        residual_trail: list[dict[str, object]] = []
-        try:
-            log = _residual_log()
-            if log is not None:
-                # scope_s clamped to [10, 600] — operator-selected past
-                # window for residual-trail distribution.  Default 30s
-                # matches canvas T_PAST.  Larger scope walks further
-                # back in the log so bin width grows accordingly.
-                scope_clamped = max(10, min(600, int(scope_s)))
-                wide_tail = log.tail(max(600, scope_clamped * 5))
-                canvas_window = float(scope_clamped)
-                n_bins = 12
-                bin_width = max(0.5, canvas_window / max(1, n_bins))
-                # Stable bucket key (2026-05-13 — operator: «цифры что
-                # предиктилось плавают»).  Prior bucket = current-age /
-                # bin_width changed each tick: a record at ts_ago=8s
-                # belonged to bin 0; one tick later (ts_ago=10s) it
-                # moved to bin 1, and bin 0's content rotated to a
-                # fresher record — pin Y jumped because record changed.
-                # New key: bucket index derived from absolute predicted_at
-                # (rounded to bin_width).  Each record stays in the
-                # same bucket forever; pins only update when a new
-                # validation enters a fresh bucket or an old one ages
-                # past the scope window.
-                picked: dict[int, object] = {}
-                for r in wide_tail:
-                    age_validation = now - r.ts
-                    if age_validation < 0 or age_validation > canvas_window:
-                        continue
-                    bucket_key = int(r.predicted_at // bin_width)
-                    existing = picked.get(bucket_key)
-                    # Keep youngest validation per stable bucket.
-                    if (
-                        existing is None
-                        or getattr(existing, "ts", 0) < r.ts  # type: ignore[arg-type]
-                    ):
-                        picked[bucket_key] = r
-                # Newest predicted_at bucket first.
-                ordered = [picked[k] for k in sorted(picked.keys(), reverse=True)]
-                if not ordered:
-                    ordered = list(reversed(wide_tail[-12:]))
-                for r in ordered[:n_bins]:
-                    residual_trail.append({
-                        "ts_ago": round(now - r.ts, 1),  # type: ignore[union-attr]
-                        "predicted_at_ago": round(now - r.predicted_at, 1),  # type: ignore[union-attr]
-                        "predicted": r.predicted_temp_c,  # type: ignore[union-attr]
-                        "actual": r.actual_temp_c,  # type: ignore[union-attr]
-                        "residual": round(r.residual_c, 2),  # type: ignore[union-attr]
-                        "bucket_key": list(r.bucket_key) if r.bucket_key else None,  # type: ignore[union-attr]
-                        "intervened": bool(getattr(r, "intervened", False)),
-                        "intervention_verbs": list(getattr(r, "intervention_verbs", ())),
-                    })
-        except Exception:  # noqa: BLE001
-            residual_trail = []
+            features = m.get("features", {}) or {}
+            now = time.time()
 
-        # Accuracy: rolling 15-min median absolute residual.
-        accuracy_pct: float | None = None
-        median_abs_err: float | None = None
-        passive_residual_count_15m = 0
-        controlled_residual_count_15m = 0
-        # Signed median (P2.9.2): consistently-negative residual = predictor
-        # over-предсказывает, cooling выигрывает у historical envelope. Это
-        # safe direction soft-cooling'а, рендерится зелёным.  Red reserved
-        # для positive median (under-prediction, real warning).
-        median_signed_err: float | None = None
-        try:
-            log = _residual_log()
-            if log is not None:
-                wide = log.tail(1024)
-                cutoff = now - 15 * 60
-                recent = [r for r in wide if r.ts >= cutoff]
-                if recent:
-                    passive_recent = [r for r in recent if not getattr(r, "intervened", False)]
-                    controlled_residual_count_15m = len(recent) - len(passive_recent)
-                    passive_residual_count_15m = len(passive_recent)
-                    accuracy_source = passive_recent or recent
-                    abs_errs = sorted(abs(r.residual_c) for r in accuracy_source)
-                    mid = abs_errs[len(abs_errs) // 2]
-                    median_abs_err = round(mid, 2)
-                    accuracy_pct = max(0.0, min(1.0, 1.0 - mid / 10.0))
-                    signed = sorted(r.residual_c for r in accuracy_source)
-                    median_signed_err = round(signed[len(signed) // 2], 2)
-        except Exception:  # noqa: BLE001
-            pass
+            # Past 60s temperature trail from sqlite frames table.
+            actual_trail: list[dict[str, float]] = []
+            try:
+                db = _open_db()
+                since = now - 60.0
+                rows = db.execute(
+                    "SELECT ts, cpu_temp FROM frames "
+                    "WHERE ts >= ? AND cpu_temp IS NOT NULL "
+                    "ORDER BY ts ASC",
+                    (since,),
+                ).fetchall()
+                db.close()
+                actual_trail = [
+                    {"ts_ago": round(now - row[0], 1), "t": float(row[1])}
+                    for row in rows
+                ]
+            except Exception:  # noqa: BLE001
+                actual_trail = []
 
-        # Current snapshot for the cockpit center.  "LIVE NOW" is the
-        # latest sample (cpu_temp_now); cpu_temp_max is a rolling-window
-        # peak and is unsuitable as a live readout.  The dT/dt readout
-        # prefers the short slope (~5 s) over the long one (~600 s) —
-        # otherwise it averages over so much bidirectional jitter that it
-        # reports ±0.001 °C/s and looks like a dead instrument.
-        short_slope = features.get("cpu_temp_slope_per_sec_short")
-        long_slope = features.get("cpu_temp_slope_per_sec")
-        cur_t = float(features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0)
-        predicted = m.get("expected_temp_c")
-        horizon = m.get("horizon_sec") or 30.0
+            # Residual trail — binned by stable bucket key.
+            residual_trail: list[dict[str, object]] = []
+            try:
+                rlog = _residual_log()
+                if rlog is not None:
+                    wide_tail = rlog.tail(max(600, scope_clamped * 5))
+                    canvas_window = float(scope_clamped)
+                    n_bins = 12
+                    bin_width = max(0.5, canvas_window / max(1, n_bins))
+                    picked: dict[int, object] = {}
+                    for r in wide_tail:
+                        age_validation = now - r.ts
+                        if age_validation < 0 or age_validation > canvas_window:
+                            continue
+                        bucket_key = int(r.predicted_at // bin_width)
+                        existing = picked.get(bucket_key)
+                        if (
+                            existing is None
+                            or getattr(existing, "ts", 0) < r.ts  # type: ignore[arg-type]
+                        ):
+                            picked[bucket_key] = r
+                    ordered = [picked[k] for k in sorted(picked.keys(), reverse=True)]
+                    if not ordered:
+                        ordered = list(reversed(wide_tail[-12:]))
+                    for r in ordered[:n_bins]:
+                        residual_trail.append({
+                            "ts_ago": round(now - r.ts, 1),  # type: ignore[union-attr]
+                            "predicted_at_ago": round(now - r.predicted_at, 1),  # type: ignore[union-attr]
+                            "predicted": r.predicted_temp_c,  # type: ignore[union-attr]
+                            "actual": r.actual_temp_c,  # type: ignore[union-attr]
+                            "residual": round(r.residual_c, 2),  # type: ignore[union-attr]
+                            "bucket_key": list(r.bucket_key) if r.bucket_key else None,  # type: ignore[union-attr]
+                            "intervened": bool(getattr(r, "intervened", False)),
+                            "intervention_verbs": list(getattr(r, "intervention_verbs", ())),
+                        })
+            except Exception:  # noqa: BLE001
+                residual_trail = []
 
-        # Multi-horizon samples of the same meta-anchored forecast curve
-        # (P2.9.3).  Curve formula (ADR-021): T(t) = T0 + (Tpred − T0)·F(t)/F(h),
-        # F(t) = 1 − exp(−t/τ), τ=4s.  At t=h → Tpred exactly.
-        #
-        # Beyond-horizon clamp (regression fix 2026-05-13): when the model's
-        # horizon_sec is shorter than a requested sample (e.g. always_idle
-        # baseline runs at 5s, UI also offers 15s/30s tabs), extrapolating
-        # F(t)/F(h) past h overshoots — at horizon=5s with cur=74, pred=56.5,
-        # _sample(15) ≈ 50 < pred=56.5, breaking monotonicity. Cap requested
-        # h at horizon_sec so any beyond-horizon tab honestly reports the
-        # at-horizon prediction instead of inventing a number the model
-        # didn't make.
-        forecasts: dict[str, float] | None = None
-        if predicted is not None and cur_t > 0:
-            import math as _m
-            tau = 4.0
-            horizon_f = float(horizon)
-            f_h = 1.0 - _m.exp(-horizon_f / tau)
-            if f_h > 1e-6:
-                full_delta = float(predicted) - cur_t
-                def _sample(h: float) -> float:
-                    h_capped = min(h, horizon_f)
-                    f = 1.0 - _m.exp(-h_capped / tau)
-                    return round(cur_t + full_delta * (f / f_h), 2)
-                forecasts = {
-                    "h5":  _sample(5.0),
-                    "h15": _sample(15.0),
-                    "h30": _sample(30.0),
-                }
+            # Accuracy: rolling 15-min median absolute residual.
+            accuracy_pct: float | None = None
+            median_abs_err: float | None = None
+            passive_residual_count_15m = 0
+            controlled_residual_count_15m = 0
+            median_signed_err: float | None = None
+            try:
+                rlog2 = _residual_log()
+                if rlog2 is not None:
+                    wide = rlog2.tail(1024)
+                    cutoff = now - 15 * 60
+                    recent = [r for r in wide if r.ts >= cutoff]
+                    if recent:
+                        passive_recent = [r for r in recent if not getattr(r, "intervened", False)]
+                        controlled_residual_count_15m = len(recent) - len(passive_recent)
+                        passive_residual_count_15m = len(passive_recent)
+                        accuracy_source = passive_recent or recent
+                        abs_errs = sorted(abs(r.residual_c) for r in accuracy_source)
+                        mid = abs_errs[len(abs_errs) // 2]
+                        median_abs_err = round(mid, 2)
+                        accuracy_pct = max(0.0, min(1.0, 1.0 - mid / 10.0))
+                        signed = sorted(r.residual_c for r in accuracy_source)
+                        median_signed_err = round(signed[len(signed) // 2], 2)
+            except Exception:  # noqa: BLE001
+                pass
 
-        current = {
-            "t": cur_t,
-            "slope": float(
-                (short_slope if short_slope is not None else long_slope) or 0.0
-            ),
-            "accel": float(features.get("cpu_temp_accel_per_sec_sq") or 0.0),
-            "load_slope": float(features.get("cpu_load_slope_per_sec") or 0.0),
-            "predicted": predicted,
-            "horizon_sec": horizon,
-            "forecasts": forecasts,
-            "confidence": m.get("confidence"),
-            "model_name": m.get("model_name"),
-            "reason": m.get("reason", ""),
-            "ts": m.get("ts"),
-            "age_sec": round(now - float(m.get("ts") or now), 1),
-        }
+            short_slope = features.get("cpu_temp_slope_per_sec_short")
+            long_slope = features.get("cpu_temp_slope_per_sec")
+            cur_t = float(features.get("cpu_temp_now", features.get("cpu_temp_max")) or 0.0)
+            predicted = m.get("expected_temp_c")
+            horizon = m.get("horizon_sec") or 30.0
 
-        return JSONResponse({
-            "current": current,
-            "actual_trail": actual_trail,
-            "residual_trail": residual_trail,
-            "accuracy_pct": accuracy_pct,
-            "median_abs_err_c": median_abs_err,
-            "median_signed_err_c": median_signed_err,
-            "passive_residual_count_15m": passive_residual_count_15m,
-            "controlled_residual_count_15m": controlled_residual_count_15m,
-            "active_tuned_profile": m.get("active_tuned_profile"),
-            "profile_changed_at": m.get("profile_changed_at"),
-            "meta_buckets": m.get("meta_buckets", 0),
-            "residual_log_count": m.get("residual_log_count", 0),
-            "spike": m.get("spike") or {"active": False},
-            # Predictor refresh health surfacing (cockpit tile renders these
-            # under the bucket-strip as "age N.Ns · skipped K · refresh Tms").
-            "prediction_age_sec": m.get("prediction_age_sec"),
-            "predict_refresh_skipped": m.get("predict_refresh_skipped", 0),
-            "predict_refresh_last_ms": m.get("predict_refresh_last_ms", 0.0),
-            "predict_refresh_inflight": m.get("predict_refresh_inflight", False),
-            # P2.9.7 — meta-bucket trust regime (prior / shrunk / confident).
-            "trust_mode": m.get("trust_mode", "prior"),
-            "trust_n": m.get("trust_n", 0),
-            "scope_s": max(10, min(600, int(scope_s))),
-        })
+            forecasts: dict[str, float] | None = None
+            if predicted is not None and cur_t > 0:
+                tau = 4.0
+                horizon_f = float(horizon)
+                f_h = 1.0 - _math.exp(-horizon_f / tau)
+                if f_h > 1e-6:
+                    full_delta = float(predicted) - cur_t
+
+                    def _sample(h: float) -> float:
+                        h_capped = min(h, horizon_f)
+                        f = 1.0 - _math.exp(-h_capped / tau)
+                        return round(cur_t + full_delta * (f / f_h), 2)
+
+                    forecasts = {
+                        "h5":  _sample(5.0),
+                        "h15": _sample(15.0),
+                        "h30": _sample(30.0),
+                    }
+
+            current = {
+                "t": cur_t,
+                "slope": float(
+                    (short_slope if short_slope is not None else long_slope) or 0.0
+                ),
+                "accel": float(features.get("cpu_temp_accel_per_sec_sq") or 0.0),
+                "load_slope": float(features.get("cpu_load_slope_per_sec") or 0.0),
+                "predicted": predicted,
+                "horizon_sec": horizon,
+                "forecasts": forecasts,
+                "confidence": m.get("confidence"),
+                "model_name": m.get("model_name"),
+                "reason": m.get("reason", ""),
+                "ts": m.get("ts"),
+                "age_sec": round(now - float(m.get("ts") or now), 1),
+            }
+
+            return {
+                "current": current,
+                "actual_trail": actual_trail,
+                "residual_trail": residual_trail,
+                "accuracy_pct": accuracy_pct,
+                "median_abs_err_c": median_abs_err,
+                "median_signed_err_c": median_signed_err,
+                "passive_residual_count_15m": passive_residual_count_15m,
+                "controlled_residual_count_15m": controlled_residual_count_15m,
+                "active_tuned_profile": m.get("active_tuned_profile"),
+                "profile_changed_at": m.get("profile_changed_at"),
+                "meta_buckets": m.get("meta_buckets", 0),
+                "residual_log_count": m.get("residual_log_count", 0),
+                "spike": m.get("spike") or {"active": False},
+                "prediction_age_sec": m.get("prediction_age_sec"),
+                "predict_refresh_skipped": m.get("predict_refresh_skipped", 0),
+                "predict_refresh_last_ms": m.get("predict_refresh_last_ms", 0.0),
+                "predict_refresh_inflight": m.get("predict_refresh_inflight", False),
+                "trust_mode": m.get("trust_mode", "prior"),
+                "trust_n": m.get("trust_n", 0),
+                "scope_s": scope_clamped,
+            }
+
+        result = await asyncio.to_thread(_work)
+        if "_error" in result:
+            return JSONResponse({"error": result["_error"]}, status_code=500)
+        return JSONResponse(result)
 
     @app.get("/api/throttle-events")
     async def throttle_events(since: str = "7d", limit: int = 200) -> JSONResponse:
-        path = _store_path()
-        if not path.exists():
-            return JSONResponse({"events": [], "total": 0})
-        cutoff = time.time() - _parse_window(since)
-        conn = sqlite3.connect(path)
-        try:
-            rows = conn.execute(
-                "SELECT ts_start, ts_end, duration, peak_temp, cause_label, "
-                "workload_at_start FROM throttle_events WHERE ts_start >= ? "
-                "ORDER BY ts_start DESC LIMIT ?",
-                (cutoff, limit),
-            ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM throttle_events").fetchone()[0]
-        finally:
-            conn.close()
-        cols = ("ts_start", "ts_end", "duration", "peak_temp",
-                "cause_label", "workload_at_start")
-        events = [dict(zip(cols, r, strict=True)) for r in rows]
-        return JSONResponse({"events": events, "total": int(total)})
+        cached, put = _cached_endpoint(f"throttle_events:{since}:{limit}", 5.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict:
+            path = _store_path()
+            if not path.exists():
+                return {"events": [], "total": 0}
+            cutoff = time.time() - _parse_window(since)
+            conn = sqlite3.connect(path)
+            try:
+                rows = conn.execute(
+                    "SELECT ts_start, ts_end, duration, peak_temp, cause_label, "
+                    "workload_at_start FROM throttle_events WHERE ts_start >= ? "
+                    "ORDER BY ts_start DESC LIMIT ?",
+                    (cutoff, limit),
+                ).fetchall()
+                total = conn.execute("SELECT COUNT(*) FROM throttle_events").fetchone()[0]
+            finally:
+                conn.close()
+            cols = ("ts_start", "ts_end", "duration", "peak_temp",
+                    "cause_label", "workload_at_start")
+            events = [dict(zip(cols, r, strict=True)) for r in rows]
+            return {"events": events, "total": int(total)}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/discoveries")
     async def discoveries() -> JSONResponse:
@@ -883,21 +1016,29 @@ def create_app(
     async def crash_recovery() -> JSONResponse:
         """Return the last hard-crash recovery event written by coolstep-cleanup.sh,
         or ``{"recovered": False}`` if no recovery has ever occurred."""
-        path = _coolstep_home() / "last-crash-recovery.json"
-        if not path.exists():
-            return JSONResponse({"recovered": False})
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"recovered": False})
-        age_sec = time.time() - float(data.get("ts", 0))
-        return JSONResponse({
-            "recovered": True,
-            "ts": data.get("ts"),
-            "kind": data.get("kind"),
-            "armed_count": data.get("armed_count", 0),
-            "age_sec": age_sec,
-        })
+        cached, put = _cached_endpoint("crash_recovery", 30.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict:
+            path = _coolstep_home() / "last-crash-recovery.json"
+            if not path.exists():
+                return {"recovered": False}
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return {"recovered": False}
+            age_sec = time.time() - float(data.get("ts", 0))
+            return {
+                "recovered": True,
+                "ts": data.get("ts"),
+                "kind": data.get("kind"),
+                "armed_count": data.get("armed_count", 0),
+                "age_sec": age_sec,
+            }
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/reliability")
     async def reliability() -> JSONResponse:
@@ -1198,22 +1339,30 @@ def create_app(
         Stale = (`started_at` + `duration_sec` + 600s) < now. File is opaque to
         the dashboard — its schema is owned by `bench/stress.sh` (PLAN §5).
         """
-        path = _coolstep_home() / "stress-state.json"
-        if not path.exists():
-            return JSONResponse({})
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({})
-        if not isinstance(data, dict):
-            return JSONResponse({})
-        started = data.get("started_at")
-        duration = data.get("duration_sec", 0) or 0
-        if isinstance(started, (int, float)) and (
-            float(started) + float(duration) + 600.0
-        ) < time.time():
-            return JSONResponse({})
-        return JSONResponse(data)
+        cached, put = _cached_endpoint("stress_state", 10.0)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict:
+            path = _coolstep_home() / "stress-state.json"
+            if not path.exists():
+                return {}
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return {}
+            if not isinstance(data, dict):
+                return {}
+            started = data.get("started_at")
+            duration = data.get("duration_sec", 0) or 0
+            if isinstance(started, (int, float)) and (
+                float(started) + float(duration) + 600.0
+            ) < time.time():
+                return {}
+            return data
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
 
     @app.get("/api/stress-runs")
     async def stress_runs(limit: int = 20) -> JSONResponse:
@@ -1290,6 +1439,27 @@ def create_app(
         verify run can quote concrete numbers. Safe to call any time."""
         body = await asyncio.to_thread(_trim_now)
         return JSONResponse(body)
+
+    @app.get("/api/self-monitor")
+    async def self_monitor_perf() -> JSONResponse:
+        """Per-route latency ring (60 samples). Regression sentinel: if
+        a future change drives any route's p95 above 200 ms, it shows here.
+
+        Returns: {routes: {"/api/foo": {p50_ms, p95_ms, p99_ms, samples}}}
+        """
+        out: dict[str, dict[str, object]] = {}
+        for route, ring in list(_ROUTE_LATENCY_RING.items()):
+            samples = sorted(ring)
+            n = len(samples)
+            if n == 0:
+                continue
+            out[route] = {
+                "p50_ms": round(_percentile(samples, 50), 2),
+                "p95_ms": round(_percentile(samples, 95), 2),
+                "p99_ms": round(_percentile(samples, 99), 2),
+                "samples": n,
+            }
+        return JSONResponse({"routes": out})
 
     # Balance-plan step IV (2026-05-14): /api/sse/telemetry removed.
     # ADR-008 deprecated. The route was a `while True; yield; sleep(1)`
