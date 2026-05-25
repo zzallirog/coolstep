@@ -1,6 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
 import { orchestrator } from './_orchestrator.js';
-import { orchestrator } from './_orchestrator.js';
 
 /** Balance-plan step II: <self-monitor-tile>
  *

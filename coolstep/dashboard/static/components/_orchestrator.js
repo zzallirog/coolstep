@@ -73,26 +73,37 @@ const _telemetrySubscribers = new Set();
 let _telemetryLastTs = null;
 let _telemetryTimerId = null;
 
+async function _pollTelemetryOnce() {
+  if (_telemetrySubscribers.size === 0) return;
+  try {
+    const r = await _budgetedFetch('/api/telemetry/latest', { cache: 'no-store' }, PRIORITY.critical);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data) return;
+    // Dedup REMOVED 2026-05-25: server cache TTL=1s + poller 1Hz + collector
+    // 1.5Hz aliased to same body → tiles froze 6-7s. Idempotent re-render is cheap.
+    _telemetryLastTs = data.ts;
+    for (const cb of _telemetrySubscribers) {
+      try { cb(data); } catch (_e) { /* tile error, don't break others */ }
+    }
+  } catch (_e) { /* network transient */ }
+}
+
 function _startTelemetryPoller() {
   if (_telemetryTimerId !== null) return;
-  _telemetryTimerId = setInterval(async () => {
-    if (_telemetrySubscribers.size === 0) return;
-    try {
-      const r = await _budgetedFetch('/api/telemetry/latest', { cache: 'no-store' }, PRIORITY.critical);
-      if (!r.ok) return;
-      const data = await r.json();
-      if (!data) return;
-      // Dedup REMOVED 2026-05-25: server has 1s cache TTL + poller fires 1Hz +
-      // collector at 1.5Hz creates phase aliasing → multiple consecutive polls
-      // returned same cached body with same ts → emit suppressed → tiles froze
-      // for 6-7s while client-side age timer ticked independently 30s→36s.
-      // Idempotent re-render in subscribers is cheap; let every poll emit.
-      _telemetryLastTs = data.ts;
-      for (const cb of _telemetrySubscribers) {
-        try { cb(data); } catch (_e) { /* tile error, don't break others */ }
-      }
-    } catch (_e) { /* network transient */ }
+  _telemetryTimerId = setInterval(() => {
+    // Skip polls when tab hidden — saves ~60 fetches/min of pure waste when
+    // user is on another tab. visibilitychange listener (registered once
+    // below) fires immediate poll on return so resume isn't laggy.
+    if (typeof document !== 'undefined' && document.hidden) return;
+    _pollTelemetryOnce();
   }, TELEMETRY_POLL_MS);
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) _pollTelemetryOnce();
+  });
 }
 
 // ── Tile registry + staggered mount ──────────────────────────────────────────
@@ -152,11 +163,46 @@ function _mount(tile) {
   try { tile.mountFn(); } catch (_e) { /* tile error isolated */ }
 }
 
+// ── Per-route failure tracking — emit global event after N consecutive fails ─
+const _routeFails = new Map(); // url → consecutive-fail count
+const DEGRADE_THRESHOLD = 3;
+
+function _markFetch(url, ok) {
+  if (typeof document === 'undefined') return;
+  if (ok) {
+    if (_routeFails.get(url)) {
+      _routeFails.delete(url);
+      document.dispatchEvent(new CustomEvent('coolstep:api-recovered', { detail: { url } }));
+    }
+    return;
+  }
+  const n = (_routeFails.get(url) || 0) + 1;
+  _routeFails.set(url, n);
+  if (n === DEGRADE_THRESHOLD) {
+    document.dispatchEvent(new CustomEvent('coolstep:api-degraded', { detail: { url, fails: n } }));
+  }
+}
+
 // ── Public singleton ─────────────────────────────────────────────────────────
 export const orchestrator = {
   /** Register a tile. Call from connectedCallback before starting own timers. */
   register(name, { priority = 'normal', mountFn, element = null } = {}) {
     const p = PRIORITY[priority] ?? PRIORITY.normal;
+    // Race 5 fix: tile may re-connect (SPA nav, devtools, browser back/fwd).
+    // Without dedup the second register() pushes a duplicate that _runBoot
+    // skips because boot is already done → reconnect tile never mounts.
+    const existing = _registry.find((e) => e.name === name);
+    if (existing) {
+      existing.priority = p;
+      existing.mountFn = mountFn;
+      existing.element = element;
+      if (existing.mounted) {
+        // Already-mounted tile reconnected — re-fire mount now.
+        existing.mounted = false;
+        _mount(existing);
+      }
+      return existing;
+    }
     const entry = { name, priority: p, mountFn, element, mounted: false };
     _registry.push(entry);
     _scheduleBoot();
@@ -183,10 +229,14 @@ export const orchestrator = {
     for (let attempt = 0; attempt <= retry; attempt += 1) {
       try {
         const r = await _budgetedFetch(url, { cache: 'no-store' }, p);
-        if (r.ok) return await r.json();
+        if (r.ok) {
+          _markFetch(url, true);
+          return await r.json();
+        }
       } catch (_e) { /* fallthrough */ }
       if (attempt < retry) await new Promise((res) => setTimeout(res, retryDelayMs));
     }
+    _markFetch(url, false);
     return fallback;
   },
 };

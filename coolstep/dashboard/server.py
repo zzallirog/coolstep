@@ -777,6 +777,15 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
 
         scope_clamped = max(10, min(600, int(scope_s)))
 
+        # TTL cache 0.75s — the only heavy endpoint that was missed by Agent A's
+        # cache pass. Cold-miss ~1.0s (sqlite + 2× residual_log full scans +
+        # binning). Cockpit tile polls 0.5-2Hz; 0.75s TTL gives near-real-time
+        # forecast without re-paying the scan cost. scope_clamped in key —
+        # 30s/1m/2m buttons must not cross-contaminate.
+        cached, put = _cached_endpoint(f"predictor_cockpit:{scope_clamped}", 0.75)
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
         def _work() -> dict:  # noqa: PLR0912
             try:
                 m = json.loads(path.read_text())
@@ -937,7 +946,7 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         result = await asyncio.to_thread(_work)
         if "_error" in result:
             return JSONResponse({"error": result["_error"]}, status_code=500)
-        return JSONResponse(result)
+        return JSONResponse(put(result))
 
     @app.get("/api/throttle-events")
     async def throttle_events(since: str = "7d", limit: int = 200) -> JSONResponse:
