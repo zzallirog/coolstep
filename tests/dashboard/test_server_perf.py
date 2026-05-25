@@ -21,7 +21,6 @@ from coolstep.core.schema import CpuMetrics, FanMetrics, GpuMetrics, TelemetryFr
 from coolstep.core.store import Store
 from coolstep.dashboard.server import (
     _GENERIC_CACHES,
-    _ROUTE_LATENCY_RING,
     _reset_endpoint_caches,
     create_app,
 )

@@ -342,22 +342,51 @@ def _warm_discoveries_cache() -> None:
         log.warning("pre-warm discoveries: %s", exc)
 
 
+def _warm_calibration_cache() -> None:
+    # Cold-miss runs 5 full-table scans on store.db. Measured at 16.6s on
+    # 300k+ frame prod store — first browser open after restart blocked
+    # the calibration-state-tile for the entire window.
+    try:
+        from coolstep.core.calibration import evaluate
+        report = evaluate(_store_path())
+        body = report.to_dict()
+        body["gates"] = {g["name"]: g for g in body["gates"]}
+        _calibration_cache["ts"] = time.monotonic()
+        _calibration_cache["body"] = body
+    except Exception as exc:
+        log.warning("pre-warm calibration: %s", exc)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     trim_task = asyncio.create_task(_periodic_malloc_trim())
-    # Pre-warm: background tasks — failures must not block startup or lifespan.
-    asyncio.create_task(asyncio.to_thread(_warm_imports))
-    asyncio.create_task(asyncio.to_thread(_warm_adapters_cache))
-    asyncio.create_task(asyncio.to_thread(_warm_discoveries_cache))
+
+    # Pre-warm is delayed: warm tasks compete with the asyncio loop for the
+    # GIL (json.loads/sqlite/subprocess all reacquire it in bursts). Firing
+    # them immediately after startup makes the FIRST browser open WORSE — /
+    # measured 14s when warms ran concurrently with HTML serving. Sleeping
+    # 2s lets uvicorn handle the initial page+tile burst, then warms run
+    # against an idle loop. Calibration is NOT pre-warmed: cold-miss is
+    # 16s on 300k+ frame store, ships even more GIL pressure than is worth
+    # the one-cache-miss-per-30s payoff.
+    async def _delayed_prewarm():
+        await asyncio.sleep(2.0)
+        asyncio.create_task(asyncio.to_thread(_warm_imports))
+        asyncio.create_task(asyncio.to_thread(_warm_adapters_cache))
+        asyncio.create_task(asyncio.to_thread(_warm_discoveries_cache))
+    prewarm_task = asyncio.create_task(_delayed_prewarm())
     try:
         yield
     finally:
         trim_task.cancel()
+        prewarm_task.cancel()
         with suppress(BaseException):
             await trim_task
+        with suppress(BaseException):
+            await prewarm_task
 
 
-def create_app(
+def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
     *,
     host_allowlist: frozenset[str] | None = None,
     origin_allowlist: frozenset[str] | None = None,

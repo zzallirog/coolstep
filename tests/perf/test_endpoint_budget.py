@@ -55,6 +55,7 @@ BUDGETS_MS: dict[str, int] = {
     "/api/reliability":                    500,   # spawns systemctl; best-effort
     "/api/hot":                             20,   # mmap read; graceful fallback if absent
     "/api/self":                           500,   # spawns systemctl; best-effort
+    "/api/self-monitor":                    20,   # in-memory latency ring read
     "/api/stress-state":                    20,   # small JSON file read
     "/api/stress-runs":                     20,   # bench index.json read
     "/api/debug/heap":                      20,   # tracemalloc check (not tracing in tests)
