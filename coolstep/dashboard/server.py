@@ -453,8 +453,17 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
         def _work() -> dict:
             store_p = _store_path()
             state_p = _ml_state_path()
+            # daemon_seen via mtime, not bare exists() — store.db lingers
+            # forever after collector dies; exists() lied "green" for 60s+
+            # while daemon was dead. Liveness = store written within 15s.
+            store_fresh = False
+            if store_p.exists():
+                try:
+                    store_fresh = (time.time() - store_p.stat().st_mtime) <= 15.0
+                except OSError:
+                    pass
             return {
-                "daemon_seen": store_p.exists(),
+                "daemon_seen": store_fresh,
                 "store_path": str(store_p),
                 "store_size_bytes": store_p.stat().st_size if store_p.exists() else 0,
                 "ml_state_seen": state_p.exists(),

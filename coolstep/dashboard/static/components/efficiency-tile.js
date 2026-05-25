@@ -284,9 +284,11 @@ export class EfficiencyTile extends LitElement {
       return { label: 'at sweet', detail: `${lp.temp.toFixed(0)}°`, cls: 'ok' };
     }
     if (dSweet < 0) {
-      return { label: 'below sweet', detail: `${dSweet.toFixed(1)}°`, cls: 'zero' };
+      // Was "${dSweet.toFixed(1)}°" — bare "−37.8°" read as a CPU temp;
+      // adding "from sweet" clarifies it's a relative offset.
+      return { label: 'below sweet', detail: `−${Math.abs(dSweet).toFixed(1)}° from sweet`, cls: 'zero' };
     }
-    return { label: 'above sweet', detail: `+${dSweet.toFixed(1)}°`, cls: 'warn' };
+    return { label: 'above sweet', detail: `+${dSweet.toFixed(1)}° from sweet`, cls: 'warn' };
   }
 
   render() {

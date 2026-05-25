@@ -1068,7 +1068,7 @@ export class PredictorCockpitTile extends LitElement {
     // (which the operator reads as ground truth) is untouched.
     for (let i = 1; i < trail.length; i++) {
       const cur = trail[i], prev = trail[i - 1];
-      if (cur.t == null || prev.t == null) continue;
+      if (cur.t == null || prev.t == null || isNaN(cur.t) || isNaN(prev.t)) continue;
       trail[i] = { ...cur, t: 0.4 * cur.t + 0.6 * prev.t };
     }
     if (trail.length >= 2) {
