@@ -60,6 +60,7 @@ dashboard/
 | `/api/profile` | Workload profile state (CODE / RENDER / GAME / BROWSER / IDLE / OTHER) | in-memory resolver |
 | `/api/crash-recovery` | Last crash recovery event detail | `data/last-crash-recovery.json` |
 | `/api/self` | Dashboard self-introspection (version, uptime, route count) | constants |
+| `/api/self-monitor` | Per-route latency ring (p50/p95/p99/samples) — middleware-tracked | in-memory `_ROUTE_LATENCY_RING` |
 | `/api/debug/heap` + `/api/debug/trim` | Memory introspection + manual gc trigger (debug only) | runtime gc/tracemalloc |
 
 ## Invariants
