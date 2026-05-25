@@ -1,6 +1,9 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class DriftTile extends LitElement {
+  static get priority() { return 'normal'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -39,6 +42,14 @@ export class DriftTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('drift-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -49,7 +60,7 @@ export class DriftTile extends LitElement {
   }
 
   async _refresh() {
-    this.report = await fetchJson('/api/drift', { severity: 0, indicators: [] });
+    this.report = await orchestrator.fetchJson('/api/drift', { severity: 0, indicators: [] });
   }
 
   _bucketClass(sev) {

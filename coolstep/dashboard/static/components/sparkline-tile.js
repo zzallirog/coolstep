@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Three sparklines (CPU temp / GPU temp / Fan max RPM) over /api/telemetry/range.
  * Plain Canvas, no chart library — keeps deps zero, atrium-style minimal.
@@ -9,6 +10,8 @@ import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame }
  * This makes the "coolstep moved first" story legible: fan RPM ramps during the
  * green band before the temp climbs into the danger zone. */
 export class SparklineTile extends LitElement {
+  static get priority() { return 'critical'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -105,6 +108,14 @@ export class SparklineTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('sparkline-tile', {
+      priority: 'critical',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 15000);
   }
@@ -116,8 +127,8 @@ export class SparklineTile extends LitElement {
 
   async _refresh() {
     const [tele, journal] = await Promise.all([
-      fetchJson(`/api/telemetry/range?since=${this.since}`, { frames: [], error: null }),
-      fetchJson('/api/actuator-journal?limit=200', { entries: [] }),
+      orchestrator.fetchJson(`/api/telemetry/range?since=${this.since}`, { frames: [], error: null }),
+      orchestrator.fetchJson('/api/actuator-journal?limit=200', { entries: [] }),
     ]);
     this.frames = tele.frames || [];
     this.error = tele.error || null;

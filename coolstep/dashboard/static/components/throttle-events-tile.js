@@ -1,7 +1,9 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
 import { LangController } from '../i18n/lang-store.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class ThrottleEventsTile extends LitElement {
+  static get priority() { return 'normal'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -112,27 +114,28 @@ export class ThrottleEventsTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('throttle-events-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
-    // Balance-plan step IV: SSE replaced by 1Hz dedup poll.
-    this._sseLastTs = null;
-    this._ssePollTimer = setInterval(async () => {
-      const data = await fetchJson('/api/telemetry/latest', null);
-      if (data && data.ts !== this._sseLastTs) {
-        this._sseLastTs = data.ts;
-        this._refresh();
-      }
-    }, 1000);
+    // Subscribe to shared telemetry poller instead of own 1Hz timer.
+    this._unsubTelemetry = orchestrator.subscribeTelemetry(() => this._refresh());
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this._timer);
-    clearInterval(this._ssePollTimer);
+    if (this._unsubTelemetry) this._unsubTelemetry();
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/throttle-events?since=7d', { events: [], total: 0 });
+    const data = await orchestrator.fetchJson('/api/throttle-events?since=7d', { events: [], total: 0 });
     this.events = data.events || [];
     this.total = data.total || 0;
   }

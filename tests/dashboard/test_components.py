@@ -35,7 +35,8 @@ def components_dir() -> Path:
 def test_base_module_exports_lit(components_dir: Path):
     text = (components_dir / "_base.js").read_text()
     assert "import {" in text
-    assert "lit@3" in text
+    # Lit is now vendored locally instead of fetched from CDN
+    assert "/static/vendor/lit.min.js" in text
     assert "export {" in text
 
 

@@ -1,6 +1,8 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 export class CalibrationStateTile extends LitElement {
+  static get priority() { return 'critical'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -46,6 +48,14 @@ export class CalibrationStateTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('calibration-state-tile', {
+      priority: 'critical',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -56,7 +66,7 @@ export class CalibrationStateTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/calibration', null);
+    const data = await orchestrator.fetchJson('/api/calibration', null);
     if (data) this.report = data;
     // если fetch упал — сохраняем prior state, не сбрасываем в "0/—"
   }

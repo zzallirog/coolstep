@@ -1,8 +1,11 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Top-K nearest historical frames from ChromaDB. Replaces the «Predictions live»
  * placeholder — once embedder fits, neighbours start appearing. */
 export class NeighboursTile extends LitElement {
+  static get priority() { return 'lazy'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -40,6 +43,14 @@ export class NeighboursTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('neighbours-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 5000);
   }
@@ -50,7 +61,7 @@ export class NeighboursTile extends LitElement {
   }
 
   async _refresh() {
-    this.state = await fetchJson('/api/neighbours', { neighbours: [] });
+    this.state = await orchestrator.fetchJson('/api/neighbours', { neighbours: [] });
   }
 
   _formatTime(ts) {

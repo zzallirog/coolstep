@@ -1,4 +1,6 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Balance-plan step II: <self-monitor-tile>
  *
@@ -76,6 +78,8 @@ function _fmtSignal(id, v) {
 }
 
 export class SelfMonitorTile extends LitElement {
+  static get priority() { return 'normal'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -153,6 +157,14 @@ export class SelfMonitorTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('self-monitor-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     // 2s cadence — endpoint is cheap (cached 1s server-side), but PSI/swap
     // signals don't move fast enough to warrant tighter polling.
@@ -165,7 +177,7 @@ export class SelfMonitorTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/self', null);
+    const data = await orchestrator.fetchJson('/api/self', null);
     this.report = data;
   }
 

@@ -1,5 +1,6 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
 import { LangController } from '../i18n/lang-store.js';
+import { orchestrator } from './_orchestrator.js';
 
 const LS_KEY = 'coolstep-actuator-filter';
 
@@ -11,6 +12,7 @@ function _lsSet(v) {
 }
 
 export class ActuatorHistoryTile extends LitElement {
+  static get priority() { return 'normal'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -148,26 +150,26 @@ export class ActuatorHistoryTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('actuator-history-tile', {
+      priority: 'normal',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
     this._tick = setInterval(() => this._tickCountdown(), 1000);
-    // Balance-plan step IV: SSE replaced by 1Hz dedup poll. SSE was only
-    // a "fresh telemetry — refresh me" trigger; one polled fetch matches.
-    this._sseLastTs = null;
-    this._ssePollTimer = setInterval(async () => {
-      const data = await fetchJson('/api/telemetry/latest', null);
-      if (data && data.ts !== this._sseLastTs) {
-        this._sseLastTs = data.ts;
-        this._refresh();
-      }
-    }, 1000);
+    // Subscribe to shared telemetry poller instead of own 1Hz timer.
+    this._unsubTelemetry = orchestrator.subscribeTelemetry(() => this._refresh());
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this._timer);
     clearInterval(this._tick);
-    clearInterval(this._ssePollTimer);
+    if (this._unsubTelemetry) this._unsubTelemetry();
   }
 
   _tickCountdown() {
@@ -176,7 +178,7 @@ export class ActuatorHistoryTile extends LitElement {
   }
 
   async _refresh() {
-    const data = await fetchJson('/api/actuator-journal?limit=50', { entries: [], total: 0 });
+    const data = await orchestrator.fetchJson('/api/actuator-journal?limit=50', { entries: [], total: 0 });
     this.entries = data.entries || [];
     this.total = data.total || 0;
     this._now = Date.now() / 1000;

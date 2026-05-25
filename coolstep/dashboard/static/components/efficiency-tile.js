@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 
 /** Live + historical thermal-efficiency curve.
  *
@@ -14,6 +15,7 @@ import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame }
  * purely the historical curve + a single live dot showing where we are on it.
  */
 export class EfficiencyTile extends LitElement {
+  static get priority() { return 'lazy'; }
   static styles = [
     tileBaseStyles,
     css`
@@ -106,30 +108,30 @@ export class EfficiencyTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('efficiency-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
-
-    // Balance-plan step IV: SSE replaced by 1Hz polling (see live-telemetry-tile).
-    this._lastSeenTs = null;
-    this._sseTimer = setInterval(async () => {
-      const data = await fetchJson('/api/telemetry/latest', null);
-      if (data && data.ts !== this._lastSeenTs) {
-        this._lastSeenTs = data.ts;
-        this._fetchRawForLive(data);
-      }
-    }, 1000);
+    // Subscribe to shared telemetry poller instead of own 1Hz timer.
+    this._unsubTelemetry = orchestrator.subscribeTelemetry((data) => this._fetchRawForLive(data));
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     clearInterval(this._timer);
-    clearInterval(this._sseTimer);
+    if (this._unsubTelemetry) this._unsubTelemetry();
   }
 
   async _fetchRawForLive(_summary) {
     const [data, ml] = await Promise.all([
-      fetchJson('/api/telemetry/latest', null),
-      fetchJson('/api/ml-state', null),
+      orchestrator.fetchJson('/api/telemetry/latest', null),
+      orchestrator.fetchJson('/api/ml-state', null),
     ]);
     if (!data?.raw) return;
 
@@ -166,8 +168,8 @@ export class EfficiencyTile extends LitElement {
   }
 
   async _refresh() {
-    this.report = await fetchJson('/api/efficiency?since=7d',
-                                  { bins: [], sample_count: 0, t_ambient: 30, t_max: 100 });
+    this.report = await orchestrator.fetchJson('/api/efficiency?since=7d',
+                                               { bins: [], sample_count: 0, t_ambient: 30, t_max: 100 });
     this.updateComplete.then(() => this._draw());
   }
 

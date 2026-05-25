@@ -1,4 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame, nothing } from './_base.js';
+import { orchestrator } from './_orchestrator.js';
 import { LangController } from '../i18n/lang-store.js';
 
 /** <incidents-tile>
@@ -17,6 +18,8 @@ import { LangController } from '../i18n/lang-store.js';
  *  26-dim telemetry embedding» or «same weekday + hour-of-day».
  */
 export class IncidentsTile extends LitElement {
+  static get priority() { return 'lazy'; }
+
   static styles = [
     tileBaseStyles,
     css`
@@ -100,6 +103,14 @@ export class IncidentsTile extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    orchestrator.register('incidents-tile', {
+      priority: 'lazy',
+      element: this,
+      mountFn: () => this._mount(),
+    });
+  }
+
+  _mount() {
     this._refresh();
     this._timer = setInterval(() => this._refresh(), 30000);
   }
@@ -111,7 +122,7 @@ export class IncidentsTile extends LitElement {
 
   async _refresh() {
     try {
-      const j = await fetchJson('/api/incidents?since=7d&limit=50');
+      const j = await orchestrator.fetchJson('/api/incidents?since=7d&limit=50');
       if (j && Array.isArray(j.incidents)) {
         this.incidents = j.incidents;
         this.error = null;
@@ -130,7 +141,7 @@ export class IncidentsTile extends LitElement {
     this.selectedTs = ts;
     this.angleMatches = null;
     try {
-      const j = await fetchJson(`/api/incidents/${ts}/similar`);
+      const j = await orchestrator.fetchJson(`/api/incidents/${ts}/similar`);
       this.angleMatches = (j && Array.isArray(j.similar)) ? j.similar : [];
     } catch (_e) {
       this.angleMatches = [];
