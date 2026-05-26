@@ -457,7 +457,21 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
 
     static_dir = _static_dir()
     if static_dir.is_dir():
-        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+        # no-cache so heuristic browser cache doesn't pin stale JS after a fix:
+        # FastAPI's default StaticFiles omits Cache-Control entirely, so browsers
+        # fall back to Last-Modified-based freshness (~10% of age). On a file
+        # modified yesterday that's ~2h of unverified cache — long enough that
+        # an orchestrator patch can ship while the dashboard tab still runs
+        # the old code. ETag/Last-Modified revalidation costs ~1ms per asset
+        # warm; this dashboard serves <30 static files so the overhead is noise.
+        class _NoCacheStatic(StaticFiles):
+            async def get_response(self, path, scope):  # type: ignore[override]
+                resp = await super().get_response(path, scope)
+                if 200 <= resp.status_code < 300:
+                    resp.headers["Cache-Control"] = "no-cache"
+                return resp
+
+        app.mount("/static", _NoCacheStatic(directory=static_dir), name="static")
 
     @app.get("/")
     async def index() -> FileResponse:

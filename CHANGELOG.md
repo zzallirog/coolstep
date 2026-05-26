@@ -8,6 +8,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follo
 
 ## [Unreleased]
 
+Nothing pending — all work merged to master.
+
+---
+
+## [0.5.20] — 2026-05-26
+
+Hotfix on top of v0.5.19. The v0.5.19 "all 19 tiles live" Playwright
+verification was a lucky run on a warm module cache; on a cold cache
+(real users on first navigation) the orchestrator boot raced module
+script execution and snapshotted the registry with only one tile in
+it. The remaining 18 sat in the registry with `mounted: false` for
+the lifetime of the page — visible empty cards despite a live daemon,
+no API calls firing for tile endpoints (`/api/adapters`, `/api/reliability`,
+`/api/actuator-journal`, `/api/predictor-cockpit`, …).
+
+### Fixed — correctness
+
+- **Orchestrator boot race: 18/19 tiles silently never mounted.**
+  `_scheduleBoot()` queued a microtask after the first `register()`
+  call. Module scripts execute as separate tasks, so the microtask
+  drained before the other 18 tile modules finished loading; their
+  registrations landed in `_registry` *after* `_runBoot` had already
+  snapshotted it, and `_bootScheduled=true` blocked any re-run.
+  Replaced the whole boot-snapshot design with per-tile mount-on-register
+  (`_mountByPriority` called directly from `register()`). The
+  connection budget still handles burst protection; no global
+  synchronization point survives, so no race. Verified via Playwright
+  on a cold cache: 19/19 tiles mount, every tile endpoint fires.
+
+- **`StaticFiles` served no `Cache-Control` header.** Without it
+  browsers fall back to Last-Modified heuristic freshness (~10% of
+  age) and can pin stale JS for hours after a fix ships — exactly
+  why this bug survived 28h+ unnoticed on the running dashboard.
+  Mounted via a `_NoCacheStatic` subclass that adds `Cache-Control:
+  no-cache` on successful static responses; ETag revalidation now
+  fires on every load (~1 ms warm), so future patches are picked
+  up on the next navigation.
+
+- **One-shot cache-bust on the orchestrator import URL.** Even after
+  the no-cache header ships, the *already-cached* `_orchestrator.js`
+  URL stays valid by browser heuristic until eviction. Added
+  `?v=mount-on-register` query to every tile's orchestrator import +
+  the `modulepreload` hint, forcing one fresh fetch under the new
+  cache policy. Future orchestrator edits don't need the query
+  string bumped — they'll be picked up via no-cache revalidation.
+
+### Verified end-to-end
+
+Playwright on cold cache after dashboard restart:
+- Mounted: 19/19 tiles (was 1/19 — only `live-telemetry-tile`, the
+  sole `priority='critical'` entry)
+- Network: every tile endpoint fires within first second of load
+- Static assets carry `Cache-Control: no-cache`, ETag revalidates 1ms
+
 ## [0.5.19] — 2026-05-25
 
 Three-round perf + correctness sweep driven by Playwright dynamic
@@ -1027,7 +1081,8 @@ All sprints (A–I) completed in a single day. 98 tests.
 
 ## Links
 
-[Unreleased]: https://github.com/zzallirog/coolstep/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/zzallirog/coolstep/compare/v0.5.20...HEAD
+[0.5.20]: https://github.com/zzallirog/coolstep/releases/tag/v0.5.20
 [0.5.0]: https://github.com/zzallirog/coolstep/releases/tag/v0.5.0
 [0.4.0]: https://github.com/zzallirog/coolstep/releases/tag/v0.4.0
 [0.3.0]: https://github.com/zzallirog/coolstep/releases/tag/v0.3.0

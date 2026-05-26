@@ -106,54 +106,54 @@ if (typeof document !== 'undefined') {
   });
 }
 
-// ── Tile registry + staggered mount ──────────────────────────────────────────
-const _registry = [];      // { name, priority, mountFn, mounted }
-let _bootScheduled = false;
+// ── Tile registry + per-priority mount on register ───────────────────────────
+//
+// History: an earlier design snapshotted the registry on a "boot" microtask
+// after the first register() call. That raced with module script execution:
+// modules run as separate tasks, the snapshot drained before later modules
+// registered, and 18/19 tiles sat unmounted forever (visible empty cards
+// despite live daemon). Replaced with per-tile mount-on-register — boot has
+// no global synchronization point any more, the connection budget already
+// handles burst protection.
 
-function _scheduleBoot() {
-  if (_bootScheduled) return;
-  _bootScheduled = true;
-  // Defer to next microtask so all connectedCallback registrations arrive first.
-  Promise.resolve().then(_runBoot);
-}
+const _registry = [];      // { name, priority, mountFn, element, mounted }
+let _staggerIdx = 0;       // monotonic counter for normal-tile stagger spread
+let _lazyObserver = null;  // single IntersectionObserver shared across lazy tiles
 
-function _runBoot() {
-  const critical = _registry.filter((t) => t.priority === PRIORITY.critical && !t.mounted);
-  const normal   = _registry.filter((t) => t.priority === PRIORITY.normal   && !t.mounted);
-  const lazy     = _registry.filter((t) => t.priority === PRIORITY.lazy     && !t.mounted);
+function _mountByPriority(entry) {
+  if (entry.mounted) return;
 
-  // Critical: mount immediately
-  for (const tile of critical) {
-    _mount(tile);
+  if (entry.priority === PRIORITY.critical) {
+    _mount(entry);
+    return;
   }
 
-  // Normal: stagger at STAGGER_MS intervals using rIC with setTimeout fallback
-  const _idle = typeof requestIdleCallback === 'function' ? requestIdleCallback : (cb) => setTimeout(cb, 0);
-  normal.forEach((tile, idx) => {
-    _idle(() => setTimeout(() => _mount(tile), idx * STAGGER_MS));
-  });
+  if (entry.priority === PRIORITY.normal) {
+    // Spread mounts across the idle window so we don't burst-fetch 18 endpoints
+    // in one frame. Each new normal tile claims the next stagger slot.
+    const idx = _staggerIdx++;
+    const _idle = typeof requestIdleCallback === 'function' ? requestIdleCallback : (cb) => setTimeout(cb, 0);
+    _idle(() => setTimeout(() => _mount(entry), idx * STAGGER_MS));
+    return;
+  }
 
-  // Lazy: defer until IntersectionObserver fires (or 2s fallback for no-IO envs)
-  const io = typeof IntersectionObserver !== 'undefined'
-    ? new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const tile = lazy.find((t) => t.element === entry.target);
-          if (tile && !tile.mounted) {
-            _mount(tile);
-            io.unobserve(entry.target);
+  // PRIORITY.lazy — wait until tile scrolls near viewport, or 2s fallback.
+  if (entry.element && typeof IntersectionObserver !== 'undefined') {
+    if (_lazyObserver === null) {
+      _lazyObserver = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          const t = _registry.find((reg) => reg.element === e.target);
+          if (t && !t.mounted) {
+            _mount(t);
+            _lazyObserver.unobserve(e.target);
           }
         }
-      }, { rootMargin: '200px 0px', threshold: 0 })
-    : null;
-
-  for (const tile of lazy) {
-    if (io && tile.element) {
-      io.observe(tile.element);
-    } else {
-      // Fallback: mount after 2s
-      setTimeout(() => _mount(tile), 2000);
+      }, { rootMargin: '200px 0px', threshold: 0 });
     }
+    _lazyObserver.observe(entry.element);
+  } else {
+    setTimeout(() => _mount(entry), 2000);
   }
 }
 
@@ -189,8 +189,8 @@ export const orchestrator = {
   register(name, { priority = 'normal', mountFn, element = null } = {}) {
     const p = PRIORITY[priority] ?? PRIORITY.normal;
     // Race 5 fix: tile may re-connect (SPA nav, devtools, browser back/fwd).
-    // Without dedup the second register() pushes a duplicate that _runBoot
-    // skips because boot is already done → reconnect tile never mounts.
+    // Without dedup the second register() pushes a duplicate; with per-tile
+    // mount-on-register we'd also re-stagger an already-mounted tile.
     const existing = _registry.find((e) => e.name === name);
     if (existing) {
       existing.priority = p;
@@ -205,7 +205,7 @@ export const orchestrator = {
     }
     const entry = { name, priority: p, mountFn, element, mounted: false };
     _registry.push(entry);
-    _scheduleBoot();
+    _mountByPriority(entry);
     _startTelemetryPoller();
     return entry;
   },

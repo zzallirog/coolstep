@@ -1,5 +1,5 @@
 import { LitElement, html, css, fmtNum, tileBaseStyles, fetchJson, renderFrame } from './_base.js';
-import { orchestrator } from './_orchestrator.js';
+import { orchestrator } from './_orchestrator.js?v=mount-on-register';
 
 export class LiveTelemetryTile extends LitElement {
   static get priority() { return 'critical'; }

@@ -1,5 +1,5 @@
 import { LitElement, html, css, fetchJson, fmtNum, tileBaseStyles, renderFrame } from './_base.js';
-import { orchestrator } from './_orchestrator.js';
+import { orchestrator } from './_orchestrator.js?v=mount-on-register';
 
 /** Three sparklines (CPU temp / GPU temp / Fan max RPM) over /api/telemetry/range.
  * Plain Canvas, no chart library — keeps deps zero, atrium-style minimal.
