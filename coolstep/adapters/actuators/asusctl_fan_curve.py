@@ -38,7 +38,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from threading import RLock
 
-from coolstep.adapters.actuators._base import append_journal_event
+from coolstep.adapters.actuators._base import (
+    append_journal_event,
+    is_batch_defer_active,
+)
 from coolstep.core.curve import (
     CurveContext,
     compose_curve,
@@ -243,6 +246,13 @@ class AsusctlFanCurve:
         # surface as the cooling bias — one actuator, two directions.
         if verb not in (ActionVerb.RAMP_COOLING, ActionVerb.REDUCE_NOISE):
             return False
+        # Defer to an external owner of the CPU-fan verb. Two such owners:
+        #   * game-mode.service / gamemoded.service (Steam sessions)
+        #   * the off-hours compute-batch (reading-batch-power sentinel flag)
+        # Either one present → this actuator stays silent so exactly one (or
+        # zero) actuator handles the verb at any moment.
+        if is_batch_defer_active():
+            return False
         return not (self._is_game_mode_active() and self._defer_to_game_mode())
 
     def dry_run(self, action: Action) -> SimResult:
@@ -429,7 +439,37 @@ class AsusctlFanCurve:
 
         Idempotent — re-issuing the same `--data` twice is a no-op for asusctl.
         DRY-RUN mode just logs.
+
+        S15 guard: if the live curve matches neither what we last issued
+        nor the saved baseline, the user edited it externally (ROG Control
+        Center, manual asusctl) while our bias was armed. Restoring the
+        stale snapshot would clobber their change — instead we cede
+        ownership: skip the write, drop the stale baseline so the next
+        apply() re-snapshots the user's new curve.
         """
+        armed = os.environ.get(ENABLE_ENV, "dry-run").lower() in {"true", "1"}
+        current = self._read_current_curve() if armed else None
+        if (
+            current is not None
+            and self._last_curve_sig is not None
+            and curve_signature(current) != self._last_curve_sig
+            and (
+                self._baseline_anchors is None
+                or curve_signature(current) != curve_signature(self._baseline_anchors)
+            )
+        ):
+            log.info(
+                "%s revert skipped: curve changed externally — ceding to user curve",
+                self.name,
+            )
+            append_journal_event({
+                "kind": "revert", "actuator": self.name,
+                "reason": "skipped — external curve change detected (S15)",
+                "cmd_executed": None,
+            })
+            self._baseline_anchors = None
+            self._baseline_at = 0.0
+            return
         if self._baseline_anchors is not None:
             # P2.4 — like apply(), revert issues `--data` first, then
             # re-affirms the enable flag in a second subprocess below.
@@ -642,6 +682,20 @@ class AsusctlFanCurve:
                 and (now - self._baseline_at) < self._baseline_ttl):
             return self._baseline_anchors
         anchors = self._read_current_curve()
+        # S15 guard (interference-matrix): when the TTL lapses while OUR
+        # bias is still applied, the freshly-read curve is the one WE
+        # issued — adopting it as «user baseline» would make revert()
+        # restore our own bias instead of the user's curve. If the read
+        # matches the last issued signature, keep the existing baseline
+        # and just refresh the TTL clock.
+        if (
+            anchors is not None
+            and self._baseline_anchors is not None
+            and self._last_curve_sig is not None
+            and curve_signature(anchors) == self._last_curve_sig
+        ):
+            self._baseline_at = now
+            return self._baseline_anchors
         if anchors is None and self._fan.lower() == "cpu":
             # P2.4 — fallback to the conservative lower-floor base when
             # asusctl can't report any curve at all (e.g. the per-fan

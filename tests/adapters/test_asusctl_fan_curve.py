@@ -337,8 +337,12 @@ def test_revert_armed_falls_back_to_default_without_baseline(monkeypatch):
     # no apply() called → _baseline_anchors stays None
     with patch("subprocess.run", return_value=_completed(stdout=b"ok")) as mock_run:
         a.revert()
-    assert mock_run.call_count == 1
-    cmd = mock_run.call_args[0][0]
+    # S15 (2026-07-10): revert first probes the live curve (read-only) to
+    # detect external user edits; unparseable probe → guard skipped.
+    assert mock_run.call_count == 2
+    probe_cmd = mock_run.call_args_list[0][0][0]
+    assert "--data" not in probe_cmd and "--default" not in probe_cmd
+    cmd = mock_run.call_args_list[1][0][0]
     assert "--default" in cmd
 
 
@@ -356,12 +360,13 @@ def test_revert_armed_restores_baseline_when_snapshot_present(monkeypatch):
     a._baseline_at = time.monotonic()
     with patch("subprocess.run", return_value=_completed(stdout=b"ok")) as mock_run:
         a.revert()
-    # P2.4 — revert now fires TWO subprocesses: first writes `--data`
-    # with the saved baseline, then re-affirms `--enable-fan-curves
-    # true` so the kernel module honours it. Combining the two on one
-    # asusctl command silently drops the enable flag.
-    assert mock_run.call_count == 2
-    data_cmd = mock_run.call_args_list[0][0][0]
+    # S15 probe (read-only) + P2.4 pair: `--data` write with the saved
+    # baseline, then `--enable-fan-curves true` re-affirm (combining the
+    # two on one asusctl command silently drops the enable flag).
+    assert mock_run.call_count == 3
+    probe_cmd = mock_run.call_args_list[0][0][0]
+    assert "--data" not in probe_cmd
+    data_cmd = mock_run.call_args_list[1][0][0]
     assert "--default" not in data_cmd
     assert "--data" in data_cmd
     data_arg = data_cmd[data_cmd.index("--data") + 1]
@@ -369,7 +374,7 @@ def test_revert_armed_restores_baseline_when_snapshot_present(monkeypatch):
     assert "75c:55%" in data_arg
     assert "90c:100%" in data_arg
     # The follow-up call must carry the enable-flag.
-    enable_cmd = mock_run.call_args_list[1][0][0]
+    enable_cmd = mock_run.call_args_list[2][0][0]
     assert "--enable-fan-curves" in enable_cmd
     assert "true" in enable_cmd
 
@@ -528,4 +533,43 @@ def test_supports_subprocess_failure_treated_as_inactive(monkeypatch):
     a = AsusctlFanCurve()
     with patch("subprocess.run",
                side_effect=subprocess.TimeoutExpired(cmd="systemctl", timeout=0.5)):
+        assert a.supports(ActionVerb.RAMP_COOLING) is True
+
+
+# ── batch-defer wiring (external compute-batch owner) ──────────────────────
+
+
+def test_supports_false_when_batch_defer_flag_present(monkeypatch, tmp_path):
+    """Batch sentinel flag present -> actuator stands down (no game-mode probe needed)."""
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER", raising=False)
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER_PATH", raising=False)
+    (tmp_path / "batch-defer.flag").write_text("")
+    a = AsusctlFanCurve()
+    # Even if game-mode probe would say inactive, the batch flag wins first.
+    with patch("subprocess.run", return_value=_completed(stdout=b"inactive", returncode=3)):
+        assert a.supports(ActionVerb.RAMP_COOLING) is False
+        assert a.supports(ActionVerb.REDUCE_NOISE) is False
+
+
+def test_supports_true_when_batch_defer_flag_absent(monkeypatch, tmp_path):
+    """No batch flag + game-mode inactive -> actuator owns the verb."""
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER", raising=False)
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER_PATH", raising=False)
+    monkeypatch.delenv("COOLSTEP_GAME_MODE_DEFER", raising=False)
+    a = AsusctlFanCurve()
+    with patch("subprocess.run", return_value=_completed(stdout=b"inactive", returncode=3)):
+        assert a.supports(ActionVerb.RAMP_COOLING) is True
+
+
+def test_supports_batch_defer_kill_switch(monkeypatch, tmp_path):
+    """COOLSTEP_BATCH_DEFER=0 -> flag ignored, actuator keeps biasing."""
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    monkeypatch.setenv("COOLSTEP_BATCH_DEFER", "0")
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER_PATH", raising=False)
+    monkeypatch.delenv("COOLSTEP_GAME_MODE_DEFER", raising=False)
+    (tmp_path / "batch-defer.flag").write_text("")
+    a = AsusctlFanCurve()
+    with patch("subprocess.run", return_value=_completed(stdout=b"inactive", returncode=3)):
         assert a.supports(ActionVerb.RAMP_COOLING) is True

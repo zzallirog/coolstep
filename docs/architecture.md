@@ -6,7 +6,10 @@
 
 ## The tick loop
 
-Once a second, the daemon does the same thing.
+Once a second, the daemon does the same thing. (That "second" is the
+deployed truth — the shipped systemd unit pins `--period 1.0`; running
+`coolstep-collector` by hand without `--period` uses the faster 10 Hz
+code default. See ADR-011.)
 
 It walks the collector registry and asks each adapter for whatever piece
 of the truth it can see. `linux_sysfs` returns CPU frequencies, hwmon
@@ -107,7 +110,7 @@ coolstep/
 │       └── game_mode_optimizer # cooperate with game-mode.service
 │
 ├── dashboard/                 # FastAPI + Lit
-│   ├── server.py              # 29 REST routes + SSE
+│   ├── server.py              # 35 REST routes (polling; SSE removed — ADR-008)
 │   └── static/                # Lit components, no bundler
 │
 └── inspect/                   # CLI
@@ -125,7 +128,7 @@ single env var or systemd drop-in. The full matrix:
 | Layer | How to run it alone | How to disable it | What still works |
 |---|---|---|---|
 | **Collectors** | `coolstep tail -n 60` (no daemon) | Per-collector: skip in `discover()`. Per-host: don't enable `coolstep-collector.service` | `coolstep compat` — read-only platform report |
-| **Predictor** | Reads SQLite store, writes `ml-state.json`, no actuator wiring | `COOLSTEP_CHROMA_DISABLED=1` falls back to `AlwaysIdleBaseline` (no KNN, no predictions) | Dashboard, collectors, store still functional |
+| **Predictor** | Reads SQLite store, writes `ml-state.json`, no actuator wiring | `COOLSTEP_CHROMA_DISABLED=1` falls back to `MetaPredictor(TrajectoryBaseline)` (`trajectory_baseline+meta` — physics trajectory + meta-corrections, no KNN recall) | Dashboard, collectors, store still functional |
 | **Actuators** | `COOLSTEP_ACTUATOR_ENABLE=true` arms them | `COOLSTEP_ACTUATOR_ENABLE=false` (the default) — every hardware-writing actuator constructs its command and logs intent without `subprocess.run` | Predictor still predicts, dashboard still shows what would have happened |
 | **Dashboard** | `coolstep-dashboard` runs alone with read-only access to store | `systemctl --user stop coolstep-dashboard` | Daemon collects + predicts + actuates without UI |
 | **Compat / manifest** | `coolstep compat` runs the detector standalone | Default L0 manifest always loads; L1 / L2 layers are opt-in | Adapters fall back to their own `discover()` checks |
@@ -202,25 +205,39 @@ directory.
 
 ### SQLite — the primary store
 
-`data/store.db` in WAL mode. Three tables:
+`data/store.db` in WAL mode. Five tables:
 
 | Table | Contents | TTL | Typical size |
 |---|---|---|---|
-| `frames` | merged `TelemetryFrame`s, one row per tick | 14 days rolling | ~150–200 MB at 1 Hz |
+| `frames` | merged `TelemetryFrame`s, one row per tick | 14 days rolling | ~1.5–2 GB at 1 Hz |
 | `throttle_events` | FSM episode boundaries with hysteresis | 90 days | tiny (<1 MB) |
 | `actions` | what the actuator router emitted and when | 90 days | tiny |
+| `meta` | key/value store metadata | permanent | tiny |
+| `daily_rollup` | one row per UTC day × workload label (+ `_all` pooled row): temp / power / fan p50 / p95 / max, throttle-event count | **permanent, no TTL** | KB/day |
 
 WAL means concurrent reads from the dashboard don't block daemon
 writes. Vacuum runs lazily — the file grows slightly above the working
-set and trims itself when the daemon is idle.
+set and trims itself when the daemon is idle (`VACUUM` reclaims to
+~1.5 GB).
+
+`daily_rollup` is the long-horizon thermal ledger: `store.rotate()`
+aggregates every complete UTC day *before* evicting its frames, so the
+per-day percentiles survive the 14-day window forever. That is what
+makes seasonal phase shifts (winter vs summer ambient),
+thermal-interface degradation and dust build-up measurable years later
+— same workload bucket, rising `temp_p95` / `fan_p95` at flat
+`power_p50` = the cooling path got worse. Served by
+`GET /api/thermal-history?since=YYYY-MM-DD&workload=X`.
 
 ### ChromaDB — the KNN backend (optional)
 
 `data/chroma/` is the HNSW vector index. Populated by the daemon from
 labeled `frames`, queried by the predictor for the top-20 cosine
 neighbours. When ChromaDB is unavailable (notably on Python 3.14 due to
-a known rust-bindings segfault) the predictor falls back to
-`AlwaysIdleBaseline` — no KNN, no predictions, dashboard still works.
+a known rust-bindings segfault — the adapter auto-detects ≥ 3.14 before
+the import; `COOLSTEP_CHROMA_FORCE=1` opts back in) the predictor falls
+back to `MetaPredictor(TrajectoryBaseline)` — physics trajectory
+forecasts, no KNN recall, dashboard still works.
 
 A watchdog in the daemon caps the chroma directory at 500 MB warn / 5
 GB error (history at the chroma-bloat incident postmortem (internal archive)); the
@@ -259,11 +276,11 @@ the snapshots and finishes the revert from outside.
 
 ### Where it adds up
 
-A typical desktop install after a week of collection:
+A typical desktop install at steady state (14-day window full):
 
 ```
 data/
-  store.db                       ~180 MB
+  store.db                       ~1.5–2 GB
   chroma/                        ~50–200 MB
   decisions.jsonl{,.1,.2}        ~3 MB
   actuator-journal.jsonl{,.1,.2} ~3 MB
@@ -272,8 +289,11 @@ data/
   ml-state.json                  10 KB
   asusctl_fan_curve_baseline.json 1 KB
 ─────────────────────────────────────────
-                                 ~250–400 MB total
+                                 ~1.6–2.2 GB total
 ```
+
+(`daily_rollup` lives inside `store.db` and adds only KB per day —
+permanent, but negligible next to the 14-day frames window.)
 
 Server-target hosts run smaller (no compositor signals, BMC is rate-limited).
 
@@ -387,16 +407,17 @@ Three corollaries from this split:
   each layer, where coolstep's authority ends
 - [privileges.md](privileges.md) — what each actuator needs from the OS
   to actually write
-- [stack-decisions.md](stack-decisions.md) — 15 ADRs covering why this
+- [stack-decisions.md](stack-decisions.md) — 21 ADRs covering why this
   stack and not another
 - [p3-plan.md](p3-plan.md) — the two-deployment-target design and the
   three-layer manifest topology
 
 ## The dashboard
 
-A FastAPI server on `:18889` with SSE for live telemetry and a static
+A FastAPI server on `:18889` with polled live telemetry (SSE was
+removed — ADR-008, deprecated 2026-05-14) and a static
 directory of Lit web components (no bundler, no build step — `esm.sh`
-serves `lit@3` directly). Twenty-nine REST routes, most read-only views
+serves `lit@3` directly). Thirty-five REST routes, most read-only views
 on the store and the live `ml-state.json` snapshot, plus three POST
 endpoints (`/api/mode/{cool,quiet,off}`) for mode switching from the
 dashboard pill.

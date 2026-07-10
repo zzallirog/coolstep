@@ -390,25 +390,29 @@ Most common failures are: missing Python dep (`uvicorn`, `fastapi`),
 port 18889 already in use, or insufficient `MemoryMax` (we ship
 768 MB; if you reduced it, raise it back).
 
-### Dashboard shows "SSE disconnected — auto-reconnect"
+### Dashboard shows "SSE disconnected — auto-reconnect" *(historical — SSE removed)*
 
-Usually `MemoryMax` too tight. Open
+SSE was removed (ADR-008, deprecated 2026-05-14); current dashboards
+poll the REST routes, so this banner can only appear on a pre-removal
+version. If you see it, upgrade. The underlying advice still applies
+to stalls in general — usually `MemoryMax` too tight. Open
 `~/.config/systemd/user/coolstep-dashboard.service.d/10-memory.conf`
 and ensure:
 
 ```ini
 [Service]
 MemoryMax=768M
-# do NOT set MemoryHigh — it breaks SSE long-poll
+# avoid MemoryHigh — reclaim throttling stalls response streaming
 ```
 
-`daemon-reload && restart`. The browser's `EventSource` reconnects
-automatically.
+`daemon-reload && restart`.
 
 ### `chromadb` segfaults on Python 3.14
 
-Known issue with chromadb-rust-bindings on Python 3.14. The daemon
-falls back to `AlwaysIdleBaseline` when ChromaDB isn't available.
+Known issue with chromadb-rust-bindings on Python 3.14. The chroma
+adapter auto-detects Python ≥ 3.14 *before* the import and the daemon
+falls back to `MetaPredictor(TrajectoryBaseline)`
+(`trajectory_baseline+meta`) when ChromaDB isn't available.
 
 To explicitly disable ChromaDB:
 
@@ -417,8 +421,9 @@ echo 'COOLSTEP_CHROMA_DISABLED=1' >> ~/.config/coolstep/env
 systemctl --user restart coolstep-collector
 ```
 
-The KNN predictor goes quiet; trajectory-fallback still works.
-Re-enable when chromadb ships a Python 3.14 wheel.
+The KNN predictor goes quiet; trajectory-fallback still predicts.
+Re-enable when chromadb ships a fixed Python 3.14 wheel — set
+`COOLSTEP_CHROMA_FORCE=1` to override the auto-guard and opt back in.
 
 ## Still stuck?
 

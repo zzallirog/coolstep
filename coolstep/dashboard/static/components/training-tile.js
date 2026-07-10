@@ -129,11 +129,11 @@ export class TrainingTile extends LitElement {
           </div>
         </div>
 
-        ${s.model_name === 'always_idle_baseline' ? html`
+        ${(s.chroma_available === false || (s.model_name && !s.model_name.startsWith('knn'))) ? html`
           <div class="banner warn">
-            ⚠ Predictor in fallback (<code>always_idle_baseline</code>) —
+            ⚠ Predictor in fallback (<code>${s.model_name || 'unknown'}</code>) —
             ChromaDB unavailable or empty. KNN inference disabled,
-            confidence is structural не reflective.
+            confidence is structural not reflective.
           </div>` : ''}
         ${(s.labeled_count !== undefined && s.labeled_count >= 0 && s.labeled_count < 5) ? html`
           <div class="banner cat">

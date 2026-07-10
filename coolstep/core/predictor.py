@@ -81,6 +81,50 @@ class AlwaysIdleBaseline:
         )
 
 
+def trajectory_signal(features: dict[str, float]) -> tuple[float, str]:
+    """Physics-first overlay: high temp + steep slope → throttle imminent.
+
+    Shared by KnnPredictor AND TrajectoryBaseline — the safety net must
+    fire regardless of which predictor is wired (the Chroma-disabled
+    fallback is exactly the mode where a recognition-independent gate is
+    most needed; see docs/p2.10 «reactive trigger, KNN-independent»).
+
+    Thresholds (private, intentionally not module-level constants):
+    - HOT_NOW_C = 78.0  → Arrhenius knee for 7nm/5nm silicon; above this
+                          MTBF starts collapsing measurably
+    - FAST_SLOPE = 1.0 °C/s  → 30s headroom from 78°C to TjMax 108°C is
+                                eaten in ~30s; act now
+    - MED_SLOPE  = 0.5 °C/s  → still ~60s of runway, but with workload
+                                persisting we'll hit the wall — pre-cool
+    - PAST_KNEE_C = 85.0  → already deep in derate territory, no slope
+                             info needed (steady-state hot)
+    """
+    # Short slope (last ~5 frames) — the safety gate cares about what
+    # the chip is doing *right now*, not the 10-minute average that
+    # the bucket-key uses.  Fallback to the long slope keeps tests
+    # and cold-start states working.
+    slope = (
+        features.get("cpu_temp_slope_per_sec_short")
+        if features.get("cpu_temp_slope_per_sec_short") is not None
+        else features.get("cpu_temp_slope_per_sec", 0.0)
+    ) or 0.0
+    # "HOT NOW" must be read off the live sample, not the rolling max —
+    # otherwise a single transient spike latches the trajectory gate
+    # for the entire window width.
+    cur = features.get("cpu_temp_now", features.get("cpu_temp_max", 0.0)) or 0.0
+    HOT_NOW_C = 78.0
+    FAST_SLOPE = 1.0
+    MED_SLOPE = 0.5
+    PAST_KNEE_C = 85.0
+    if cur >= HOT_NOW_C and slope >= FAST_SLOPE:
+        return 0.9, f"trajectory: {cur:.1f}°C rising {slope:.2f}°C/s"
+    if cur >= HOT_NOW_C and slope >= MED_SLOPE:
+        return 0.7, f"trajectory: {cur:.1f}°C rising {slope:.2f}°C/s"
+    if cur >= PAST_KNEE_C:
+        return 0.65, f"trajectory: {cur:.1f}°C (already past knee)"
+    return 0.0, ""
+
+
 class TrajectoryBaseline:
     """Saturation-aware short-horizon temperature forecast.
 
@@ -147,7 +191,7 @@ class TrajectoryBaseline:
             asymptote_delta = slope * self.tau_sec   # = T_eq - T_0
             expected_raw = current + asymptote_delta * factor
             expected = max(20.0, min(120.0, expected_raw))
-        return Prediction(
+        pred = Prediction(
             horizon_sec=self.horizon_sec,
             throttle_prob=0.0,
             expected_temp_c=expected,
@@ -156,6 +200,12 @@ class TrajectoryBaseline:
             features_used=sorted(features.keys()),
             reason=f"saturation extrapolation: T0 + slope·τ·(1-exp(-h/τ))  [τ={self.tau_sec}s]",
         )
+        # Physics safety overlay — same recognition-independent gate the
+        # KNN path carries. Without it the fallback mode (Chroma disabled)
+        # had throttle_prob hard-0: no NOTIFY, no trajectory safety net,
+        # exactly when the model-free gate is the only line of defence.
+        traj_prob, traj_reason = trajectory_signal(features)
+        return _merge_with_trajectory(pred, traj_prob, traj_reason, features)
 
 
 class KnnPredictor:

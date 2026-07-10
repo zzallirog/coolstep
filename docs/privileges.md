@@ -149,16 +149,15 @@ sudo chmod 0440 /etc/sudoers.d/coolstep-ryzenadj
 sudo visudo -c -f /etc/sudoers.d/coolstep-ryzenadj
 ```
 
-Then update `~/.config/systemd/user/coolstep-collector.service.d/40-ryzenadj.conf`:
-
-```ini
-[Service]
-Environment=COOLSTEP_RYZENADJ_CMD="sudo /usr/bin/ryzenadj"
-```
-
-The daemon will prepend `sudo` to ryzenadj invocations. Because of
-NOPASSWD, no password prompt — but the audit trail still lands in
-`/var/log/auth.log` for every write.
+No env var needed — the actuator always shells out through
+`sudo -n /usr/bin/ryzenadj` and probes the sudoers entry at startup
+(`_sudoers_preflight()` runs `sudo -n /usr/bin/ryzenadj --version`;
+the actuator refuses to load and logs the exact snippet to install if
+the probe fails). Because of NOPASSWD, no password prompt — but the
+audit trail still lands in `/var/log/auth.log` for every write.
+(`COOLSTEP_RYZENADJ_FORCE=1` exists as a separate override to keep the
+actuator when TLP owns STAPM/PPT — it does not change the sudo
+routing.)
 
 **Why sudoers and not setcap?** ryzenadj needs to open `/dev/cpu/*/msr`,
 which is mode `0600 root:root`. `setcap CAP_SYS_RAWIO` on the ryzenadj
@@ -203,10 +202,12 @@ $USER ALL=(root) NOPASSWD: /usr/bin/ryzenadj
 EOF
 sudo chmod 0440 /etc/sudoers.d/coolstep-ryzenadj
 
+#    (the actuator invokes `sudo -n /usr/bin/ryzenadj` itself and
+#    preflights the sudoers entry at startup — no extra env needed)
+
 cat > ~/.config/systemd/user/coolstep-collector.service.d/40-actuators.conf <<'EOF'
 [Service]
 Environment=COOLSTEP_ACTUATOR_ENABLE=true
-Environment=COOLSTEP_RYZENADJ_CMD="sudo /usr/bin/ryzenadj"
 EOF
 
 # 4. Reload and restart

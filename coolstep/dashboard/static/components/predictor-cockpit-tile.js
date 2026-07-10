@@ -1516,11 +1516,18 @@ export class PredictorCockpitTile extends LitElement {
       : 'median actual − predicted over the last 30 seconds — fast, what is happening right now';
     const spike = this.state?.spike || {};
     const spikeChip = spike.active ? this._renderSpikeChip(spike) : null;
+    const degradedChip = this.state?.degraded ? html`
+      <span class="acc-chip warn"
+            title="KNN not in the loop (${this.state?.model_name || 'fallback'}): forecast is physics+meta only, confidence is structural, not reflective. Workload recognition disabled.">
+        <span class="lbl">⛔ fallback</span>
+        <span class="v">${(this.state?.model_name || '?').replace('+meta', '')}</span>
+      </span>` : null;
     return html`
       <span class="acc-stack">
         ${this._horizonToggle()}
         ${this._scopeToggle()}
         ${this._pinCountToggle()}
+        ${degradedChip}
         ${spikeChip}
         <span class="acc-chip ${cls15}" title="${tip15}">
           <span class="lbl">±err · 15m</span>

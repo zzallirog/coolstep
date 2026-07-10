@@ -12,6 +12,98 @@ Nothing pending — all work merged to master.
 
 ---
 
+## [0.5.21] — 2026-07-10
+
+Logic-flaw audit sweep (2026-07-10): «stated intent ↔ actual behavior»
+gaps hunted across daemon/predictor/dashboard/docs, then fixed. Six
+confirmed findings, all with file:line proofs; 1025 tests green after.
+
+### Fixed — the predictor actually predicts in fallback mode
+
+- **Physics trajectory overlay was welded to the KNN path.** The
+  recognition-independent safety gate («94°C rising — act regardless of
+  neighbours») lived inside `KnnPredictor` only, so the deployed
+  fallback (`MetaPredictor(TrajectoryBaseline)`, Chroma disabled) had
+  `throttle_prob` hard-0 forever: no NOTIFY, no safety net, exactly in
+  the mode with no other line of defence. Overlay extracted to
+  `predictor.trajectory_signal()` and merged by TrajectoryBaseline too.
+- **Dry-run applies poisoned the causal ledger.** In dry-run (the
+  shipped default) every `apply()` returned `error=None`, so the daemon
+  armed the action AND recorded an intervention window → validated
+  residuals inside it were excluded from ResidualBank training. Pure
+  passive thermal samples thrown away exactly during hot moments, for
+  every monitoring-only deployment. Windows now recorded only when
+  `COOLSTEP_ACTUATOR_ENABLE` is truthy.
+- **decisions.jsonl silently dropped every low-confidence call** via the
+  `confidence < min_arm_confidence` early return — while the module
+  contract says «records EVERY decide() call». The log was blind exactly
+  in the region used to tune `min_arm_confidence`. Now logs before the
+  early return.
+- **Orphan-label recovery poisoned the 82-90°C band.** Restart-orphaned
+  chroma vectors were blanket-relabelled COOL, contradicting the live
+  labeler (whose lookahead window includes the frame itself, so ≥82°C
+  provably labels HOT). Recovery now splits on `HOT_THRESHOLD_C`.
+
+### Fixed — one readiness predicate, honestly surfaced
+
+- **Calibration split-brain.** Docs said «8 gates», the daemon evaluated
+  6 (cost gates never received inputs), the dashboard recomputed its own
+  5. Daemon now feeds real cost metrics (`/proc/self/status` VmRSS,
+  process-time CPU%) → all 8 code gates live; the full gate report is
+  dumped into `ml-state.json` and `/api/calibration` serves it
+  (`source: "daemon"`), falling back to a local recompute
+  (`source: "dashboard-recompute"`) only when the daemon is dead.
+- **Drift «red disarms actuator» was doc-fiction** — the word `disarm`
+  didn't exist in code. Implemented: any indicator at severity ≥ 0.8
+  (env `COOLSTEP_DRIFT_DISARM_SEVERITY`) holds `calibration_ready`
+  False. Sub-red indicators (embedder_cold, knn_low_confidence) surface
+  without blocking, so intentional fallback deployments stay armed-able.
+- **Degraded predictor rendered as maximally healthy.** The
+  training-tile fallback banner matched only `always_idle_baseline` — a
+  model no longer wired — so the real fallback
+  (`trajectory_baseline+meta`) showed no warning and the cockpit
+  displayed structural confidence as reflective. Banner now keys on
+  `chroma_available === false` / non-KNN model; cockpit gains a
+  `degraded` field + «⛔ fallback» chip.
+- **Python 3.14 auto-fallback now exists.** README promised the daemon
+  «detects and falls back automatically» on the chromadb 3.14 segfault;
+  detection now happens before import (a segfault can't be caught).
+  Opt back in via `COOLSTEP_CHROMA_FORCE=1`.
+
+### Fixed — interference S15 closed (asusctl baseline drift)
+
+- `revert()` re-reads the live curve first: matches neither the last
+  issued curve nor the saved baseline → user edited it externally →
+  restore skipped, stale baseline dropped, cession journaled.
+- `_ensure_baseline()` refuses to adopt coolstep's own issued curve as
+  «user baseline» when the TTL lapses while a bias is applied.
+- Matrix: 10 covered / 3 open gaps (S08, S10, S14) / 4 structural.
+
+### Added — long-horizon thermal ledger (`daily_rollup`)
+
+- New permanent sqlite table: one row per UTC day × workload label
+  (+ pooled `_all` row) with cpu-temp/power/fan p50/p95/max and daily
+  throttle-event count. Populated by `rotate()` **before** frame
+  eviction; survives the 14-day frames TTL indefinitely (~KB/day).
+  This is the substrate for seasonal phase shifts (winter/summer
+  ambient), thermal-interface degradation and dust tracking: same
+  workload bucket, rising temp_p95/fan_p95 at flat power_p50 = the
+  cooling path got worse.
+- `GET /api/thermal-history?since=YYYY-MM-DD&workload=X` serves the
+  ledger (raw read-only query — dashboard still never writes sqlite).
+
+### Fixed — small correctness
+
+- `_recover_armed_actions` no longer rebuilds corrupt (nameless)
+  entries under a `None` key — they are skipped.
+- Documentation sweep: SSE-zombie sections, stale gate/env/tick-rate/
+  store-size/test-count numbers, ghost env vars (`COOLSTEP_TICK_HZ`,
+  `COOLSTEP_MIN_ARM_*`, `COOLSTEP_RYZENADJ_CMD`), AlwaysIdleBaseline
+  references, interference tallies.
+
+
+---
+
 ## [0.5.20] — 2026-05-26
 
 Hotfix on top of v0.5.19. The v0.5.19 "all 19 tiles live" Playwright

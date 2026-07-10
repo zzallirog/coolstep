@@ -269,16 +269,29 @@ def _assert_outcome(outcome, scenario):
         )
 
     elif name == "s15-asusctl-baseline-drift":
-        # Proof-of-gap: revert() implementation in asusctl_fan_curve does NOT
-        # re-read current curve before restoring baseline.
+        # Gate added 2026-07-10: revert() re-reads the live curve and cedes
+        # when it matches neither the last issued curve nor the saved
+        # baseline (external/user edit); _ensure_baseline() refuses to
+        # adopt our own issued curve as «user baseline» on TTL lapse.
         import inspect
 
         from coolstep.adapters.actuators import asusctl_fan_curve as _af
         revert_src = inspect.getsource(_af.AsusctlFanCurve.revert)
         check(
-            "revert does not re-read curve before restoring",
-            "fan-curve -j" not in revert_src and "current_curve" not in revert_src.lower(),
-            "Gap: revert blindly restores _baseline without drift check",
+            "revert re-reads live curve before restoring",
+            "_read_current_curve" in revert_src,
+            "revert must probe the live curve to detect user override",
+        )
+        check(
+            "revert cedes on external change",
+            "revert skipped" in revert_src or "ceding" in revert_src,
+            "revert must skip restore when the user edited the curve",
+        )
+        baseline_src = inspect.getsource(_af.AsusctlFanCurve._ensure_baseline)
+        check(
+            "baseline refuses own curve",
+            "_last_curve_sig" in baseline_src,
+            "TTL re-snapshot must not adopt our own issued curve as baseline",
         )
 
     elif name == "s16-ryzenadj-sudoers-missing":

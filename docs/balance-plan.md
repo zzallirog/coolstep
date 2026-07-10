@@ -23,6 +23,8 @@ Heap leak chase produced one real fix:
 
 Mitigations layered along the way:
 - `MemoryMax` 1.5G/3G + `MemoryHigh` + `MemorySwapMax` (drop-ins `10-memory.conf`)
+  — maintainer-host drop-in experiments, NOT the shipped units (repo units:
+  collector 512M/10%, dashboard 768M/30%, без `MemoryHigh`)
 - `MALLOC_ARENA_MAX=2` + `MALLOC_TRIM_THRESHOLD_=131072` (drop-ins `91-malloc-tune.conf`) — modest help, kept
 - `RuntimeDirectory=coolstep` drop-ins for both services (else `ProtectSystem=strict` blocks tmpfs write)
 

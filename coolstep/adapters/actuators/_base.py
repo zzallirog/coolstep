@@ -34,6 +34,63 @@ def _journal_path() -> Path:
     return home / JOURNAL_FILE
 
 
+# ── batch-defer (external compute-batch owner) ─────────────────────────────
+#
+# Symmetric to the game-mode defer: an external owner (the off-hours
+# `reading-batch-power` script around `reading-warm-premium.service`) takes
+# the wheel on the machine's acoustic profile — it caps CPU freq, locks the
+# NVIDIA clock, and wants the box quiet. While it runs, coolstep's CPU-fan
+# actuators should stand down (the same "exactly one (or zero) actuator owns
+# the verb at any moment" contract as game-mode), so the two stop fighting
+# the fan and corrupting coolstep's baseline / efficiency model.
+#
+# The owner signals "I'm running" by touching a sentinel FILE (cheap, survives
+# the batch process, trivially inspectable, removed even on failure via the
+# service's ExecStopPost restore). coolstep only READS it — it never writes
+# the file and never actuates CPU freq / GPU clock itself (those stay outside
+# coolstep's authority per docs/curve-ownership.md).
+#
+# Default: ON (defer when the flag is present). Kill switch:
+# COOLSTEP_BATCH_DEFER=0 disables the probe entirely (coolstep keeps biasing
+# even while the batch runs — the cooperative analogue of GAME_MODE_DEFER=0).
+DEFAULT_BATCH_DEFER_FILE = "batch-defer.flag"
+
+
+def _batch_defer_path() -> Path:
+    """Sentinel file the external compute-batch owner touches while running.
+
+    Override with COOLSTEP_BATCH_DEFER_PATH (absolute path). Default sits next
+    to the journal in COOLSTEP_HOME so it shares the daemon's data dir and the
+    same per-host privacy boundary.
+    """
+    override = os.environ.get("COOLSTEP_BATCH_DEFER_PATH")
+    if override:
+        return Path(override)
+    home = Path(os.environ.get("COOLSTEP_HOME", str(Path.home() / "coolstep" / "data")))
+    return home / DEFAULT_BATCH_DEFER_FILE
+
+
+def is_batch_defer_active() -> bool:
+    """True when an external compute-batch owner has signalled it's running.
+
+    Two conditions, both required:
+      * COOLSTEP_BATCH_DEFER is not disabled ("0"/"false") — default-on.
+      * The sentinel file exists.
+
+    Any error stat-ing the file is treated as "not active" — a probe failure
+    must never block coolstep (mirrors the game-mode probe's fail-open-to-
+    actuating posture). No caching here: a single `Path.exists()` is cheaper
+    than the monotonic-clock bookkeeping the systemctl probe needs.
+    """
+    if os.environ.get("COOLSTEP_BATCH_DEFER", "1").lower() in {"0", "false"}:
+        return False
+    try:
+        return _batch_defer_path().exists()
+    except OSError as exc:
+        log.debug("batch-defer probe failed: %r", exc)
+        return False
+
+
 def _rotate_journal(path: Path) -> None:
     """Rotate journal files: .1→.2, active→.1, fresh active created on next open.
 

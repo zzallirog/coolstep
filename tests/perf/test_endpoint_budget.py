@@ -65,6 +65,7 @@ BUDGETS_MS: dict[str, int] = {
     "/api/event-segments":                  20,   # placeholder, returns empty list
     "/api/efficiency-table":                20,   # JSONL read; graceful fallback
     "/api/incidents":                       80,   # JSONL read, 15s cache
+    "/api/thermal-history":                 80,   # daily_rollup sqlite read, 60s cache
 }
 
 # Routes whose full URL for the test call uses query parameters.

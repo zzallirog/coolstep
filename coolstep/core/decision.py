@@ -2,8 +2,10 @@
 
 Calibration gate `ready` is a boolean owned by the daemon (driven by
 calibration.py). When NOT ready — DecisionEngine still emits *intent*
-Actions (NOTIFY_USER), so the dashboard can show what the system would do —
-but daemon routes them to the readonly actuator.
+Actions (NOTIFY_USER), so the dashboard can show what the system would do.
+The daemon's dual-pass router journals every action via readonly_log and
+routes NOTIFY_USER to notify_send when present (desktop notification —
+informational, not a hardware write).
 
 When ready — Actions are still gated by Predictor.confidence and
 throttle_prob thresholds.
@@ -283,6 +285,13 @@ class DecisionEngine:
             prediction.confidence < self.thresholds.min_arm_confidence
             and not force_fire
         ):
+            # Still log: the module contract is «decisions.jsonl records
+            # EVERY decide() call». Skipping the low-confidence region made
+            # the log blind exactly where min_arm_confidence would be tuned.
+            _append_decision_log(
+                prediction, actions, calibration_ready, labeled_count,
+                self.thresholds,
+            )
             return actions
 
         # --- Hard verb: shift_power_envelope ---

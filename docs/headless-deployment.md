@@ -179,6 +179,7 @@ default 1 Hz collector (`--period 1.0`) the expected steady state is:
 | `store.db` (frames + raw_json BLOB) | ~1.5–2 GB | 86 400 frames/day × 14d retention × ~1.5 KB raw_json. `rotate()` evicts frames older than `FRAMES_TTL_SEC=14d` (90d for throttle_events / actions). |
 | `data/chroma/` (HNSW index) | ~100–150 MB | Sliding-window reindex from store.db. Rebuildable. |
 | `actuator-journal.jsonl`, `drift-history.jsonl` | KB–MB | Append-only, low volume. |
+| `daily_rollup` table (inside `store.db`) | KB/day | Permanent per-day thermal ledger (no TTL) — survives the 14-day frame eviction; negligible size. |
 | Journal (`journalctl --user -u coolstep-*`) | depends on `SystemMaxUse` | Default systemd journal cap. |
 
 Concrete ground truth from a real deployment — 11 days uptime, 1 Hz

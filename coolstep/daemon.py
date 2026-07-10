@@ -110,6 +110,11 @@ RUNTIME_STATE_FILE = "runtime-state.json"
 VALID_MODES: frozenset[str] = frozenset({"cool", "quiet", "off"})
 DEFAULT_MODE = "cool"
 
+# Drift belt: any indicator at/above this severity holds calibration_ready
+# False (docs/drift-detection.md «red disarms»). 0.8 keeps intentional
+# fallback states (embedder_cold 0.4, knn_low_confidence 0.5) sub-red.
+DRIFT_DISARM_SEVERITY = float(os.environ.get("COOLSTEP_DRIFT_DISARM_SEVERITY", 0.8))
+
 
 @dataclass(slots=True, frozen=True)
 class _PendingPrediction:
@@ -227,6 +232,11 @@ class Daemon:
             self.predictor = MetaPredictor(base=TrajectoryBaseline())
         self.decision = DecisionEngine()
         self.calibration_ready = False
+        # Gate report as last computed by _refresh_calibration — dumped into
+        # ml-state.json so daemon and dashboard share one readiness predicate.
+        self._last_calibration_report: dict[str, Any] | None = None
+        self._last_drift_severity: float = 0.0
+        self._cpu_pct_sample: tuple[float, float] | None = None
         self._stop = asyncio.Event()
         self._tick_count = 0
         # Balance-plan step I (2026-05-14): observer-effect self-monitoring.
@@ -1160,14 +1170,20 @@ class Daemon:
 
     def _recover_orphan_labels(self) -> int:
         """Re-label chroma vectors that missed backfill (daemon restart while
-        their +30s lookahead was pending). Default → COOL: they were active
-        in `_labelled_window` at shutdown, не triggered throttle FSM (which
-        persists separately), значит idle/cool baseline. Without this any
-        unlabelled vector stays LABEL_UNKNOWN forever and is excluded by
-        `labeled_only=True` in KnnPredictor (predictor-audit risk #6)."""
+        their +30s lookahead was pending). Label by the frame's own temp:
+        the live labeler's lookahead window INCLUDES the frame itself, so
+        `peak_temp_after >= cpu_temp_at` is a provable lower bound — a frame
+        already at/above HOT_THRESHOLD_C always labels HOT on the live path,
+        and orphan recovery must agree (blanket-COOL poisoned the 82-90°C
+        band: hot at shutdown, FSM not yet tripped at 90, labelled COOL).
+        Below the threshold → COOL, same optimistic assumption the previous
+        blanket default made, now scoped to where it can't contradict the
+        live labeler. Without recovery any unlabelled vector stays
+        LABEL_UNKNOWN forever and is excluded by `labeled_only=True` in
+        KnnPredictor (predictor-audit risk #6)."""
         if not self.chroma.available:
             return 0
-        from coolstep.core.schema import LABEL_COOL
+        from coolstep.core.schema import LABEL_COOL, LABEL_HOT
         cutoff = time.time() - 60.0  # 2× LOOKAHEAD_SEC = grace window
         try:
             orphans = self.chroma.list_unlabeled(before_ts=cutoff, limit=2000)
@@ -1177,18 +1193,25 @@ class Daemon:
         if not orphans:
             return 0
         recovered = 0
+        recovered_hot = 0
         for o in orphans:
             ts = o.get("ts")
             meta = dict(o.get("metadata") or {})
-            meta["was_hot_in_30s"] = LABEL_COOL
-            meta["peak_temp_after"] = float(meta.get("cpu_temp_at", 0.0))
+            temp_at = float(meta.get("cpu_temp_at", 0.0))
+            if temp_at >= HOT_THRESHOLD_C:
+                meta["was_hot_in_30s"] = LABEL_HOT
+                recovered_hot += 1
+            else:
+                meta["was_hot_in_30s"] = LABEL_COOL
+            meta["peak_temp_after"] = temp_at  # lower bound; true peak unknown
             try:
                 self.chroma.update_metadata(float(ts), meta)
                 recovered += 1
             except Exception:  # noqa: BLE001
                 pass
         if recovered:
-            log.info("recovered %d orphan labels → LABEL_COOL", recovered)
+            log.info("recovered %d orphan labels (%d HOT, %d COOL)",
+                     recovered, recovered_hot, recovered - recovered_hot)
         return recovered
 
     def _restore_runtime_state(self) -> None:
@@ -1276,7 +1299,17 @@ class Daemon:
         *,
         now: float,
     ) -> None:
-        """Track real control writes that can affect future residuals."""
+        """Track real control writes that can affect future residuals.
+
+        Dry-run mode (COOLSTEP_ACTUATOR_ENABLE unset — the shipped default)
+        never touches hardware, so its ActionResults must NOT open an
+        intervention window: marking those residuals `intervened=True`
+        excluded pure passive thermal samples from ResidualBank training
+        exactly during the hot moments the meta-predictor most needs —
+        systematic learning starvation for monitoring-only deployments.
+        """
+        if os.environ.get("COOLSTEP_ACTUATOR_ENABLE", "dry-run").lower() not in {"true", "1"}:
+            return
         if actuator_name in _NO_REVERT_ACTUATORS:
             return
         if action.verb not in _CONTROL_VERBS:
@@ -1743,7 +1776,9 @@ class Daemon:
         for entry in armed:
             name = entry.get("actuator")
             expires_at = float(entry.get("expires_at", 0.0))
-            if not name or expires_at >= now + 60.0:
+            if not name:
+                continue  # corrupt entry — was rebuilt under a None key before
+            if expires_at >= now + 60.0:
                 # Still well within TTL — treat as live; rebuild armed map
                 # so the per-tick sweep handles it normally.
                 verb_raw = entry.get("verb", "")
@@ -1893,8 +1928,68 @@ class Daemon:
         drift_mod.append_history(history_path, snap)
 
     def _refresh_calibration(self) -> None:
-        report = eval_calibration(store_path=self.store.path, ring=self.ring)
-        self.calibration_ready = report.ready
+        report = eval_calibration(
+            store_path=self.store.path,
+            ring=self.ring,
+            cost_rss_kb=self._self_rss_kb(),
+            cost_cpu_pct=self._self_cpu_pct(),
+        )
+        # Drift belt (docs/drift-detection.md): a red indicator disarms the
+        # actuator. «Red» = severity >= DRIFT_DISARM_SEVERITY; sub-red
+        # indicators (embedder_cold 0.4, knn_low_confidence 0.5,
+        # chroma_no_growth 0.6) surface in the dashboard but don't block,
+        # so an intentional fallback deployment isn't permanently disarmed.
+        drift_ready = True
+        try:
+            history_path = self.ml_state_path.parent / "drift-history.jsonl"
+            drift_report = drift_mod.evaluate(self.ml_state_path, history_path)
+            self._last_drift_severity = float(drift_report.severity)
+            if drift_report.severity >= DRIFT_DISARM_SEVERITY:
+                drift_ready = False
+                reasons = [
+                    i.name for i in drift_report.indicators
+                    if i.severity >= DRIFT_DISARM_SEVERITY
+                ]
+                if self.calibration_ready:  # log only on the disarming edge
+                    log.warning(
+                        "drift disarm: severity=%.2f (%s) — calibration held not-ready",
+                        drift_report.severity, ",".join(reasons),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("drift evaluate failed: %r", exc)
+        self.calibration_ready = report.ready and drift_ready
+        # Full gate report → ml-state.json so the dashboard renders THE SAME
+        # predicate that arms the daemon (was: dashboard recomputed its own
+        # 5-gate subset while the daemon used 6 — split-brain readiness).
+        self._last_calibration_report = report.to_dict()
+        self._last_calibration_report["drift_severity"] = self._last_drift_severity
+        self._last_calibration_report["ready"] = self.calibration_ready
+
+    def _self_rss_kb(self) -> float | None:
+        """Own RSS in KB from /proc/self/status (Linux). None elsewhere —
+        evaluate() then skips the cost gates, same as before they were fed."""
+        try:
+            with open("/proc/self/status", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return float(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+        return None
+
+    def _self_cpu_pct(self) -> float | None:
+        """Own CPU% since the previous calibration refresh: Δprocess_time /
+        Δwall. First call returns None (no interval yet)."""
+        now_wall = time.monotonic()
+        now_cpu = time.process_time()
+        prev = self._cpu_pct_sample
+        self._cpu_pct_sample = (now_wall, now_cpu)
+        if prev is None:
+            return None
+        dw = now_wall - prev[0]
+        if dw <= 0:
+            return None
+        return 100.0 * (now_cpu - prev[1]) / dw
 
     def _refit_embedder(self) -> None:
         """Refresh per-feature stats over the rolling ring window.
@@ -2065,6 +2160,10 @@ class Daemon:
             "reason": getattr(prediction, "reason", ""),
             "features": features,
             "calibration_ready": self.calibration_ready,
+            # Same predicate that arms the daemon — dashboard /api/calibration
+            # serves this when fresh instead of recomputing its own subset.
+            "calibration": self._last_calibration_report,
+            "drift_severity": self._last_drift_severity,
             "collectors": [c.name for c in self.collectors],
             "collector_costs_us": {c.name: c.cost().sample_us for c in self.collectors},
             "actuators": [a.name for a in self.actuators],

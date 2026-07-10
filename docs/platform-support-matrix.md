@@ -7,7 +7,7 @@
 
 | Платформа | Collectors готовы | Actuators готовы | Status |
 |---|---|---|---|
-| **Linux laptop** (target: ASUS TUF A15, AMD+NVIDIA) | linux_sysfs, amdgpu, nvidia_nvml, hyprctl | readonly_log | ✅ live, 4/4 discovers, 98 tests |
+| **Linux laptop** (target: ASUS TUF A15, AMD+NVIDIA) | linux_sysfs, amdgpu, nvidia_nvml, hyprctl (4 из 12 shipped collectors — полный список в `coolstep/adapters/collectors/CLAUDE.md`) | readonly_log | ✅ live, все listed discover'ятся, 98 tests (P0-era count) |
 | Linux desktop (без iGPU/без Hyprland) | linux_sysfs, nvidia_nvml | readonly_log | ⚠️ должно работать (linux_sysfs универсален), не verified |
 | **Linux headless server** (Intel i5-13500 / Debian 13 / kernel 6.12) | linux_sysfs, intel_i915, dbus_session, rapl_energy | readonly_log | ✅ live since 2026-05-12, 5/5 discovers, headless via linger |
 | Windows | none | none | ❌ |

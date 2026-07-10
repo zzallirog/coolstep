@@ -182,6 +182,35 @@ def _residual_log_path() -> Path:
     return _coolstep_home() / "residual-state.jsonl"
 
 
+# /api/calibration: how old the daemon's in-ml-state gate report may be and
+# still be preferred over a local recompute. Daemon refreshes it every 60
+# ticks (~1 min at 1 Hz); 180 s tolerates a slow tick without flapping to
+# the recompute path.
+_DAEMON_CALIBRATION_MAX_AGE_SEC = 180.0
+
+
+def _read_daemon_calibration() -> dict | None:
+    """The daemon's own gate report from ml-state.json — the exact predicate
+    that arms actuation. Returns None when absent/stale/unreadable so the
+    caller can fall back to a local (store-only) recompute."""
+    path = _ml_state_path()
+    try:
+        if time.time() - path.stat().st_mtime > _DAEMON_CALIBRATION_MAX_AGE_SEC:
+            return None
+        snap = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    report = snap.get("calibration")
+    if not isinstance(report, dict) or "gates" not in report:
+        return None
+    body = dict(report)
+    gates = body.get("gates")
+    if isinstance(gates, list):  # daemon stores the list form; tile wants dict
+        body["gates"] = {g["name"]: g for g in gates if isinstance(g, dict)}
+    body["source"] = "daemon"
+    return body
+
+
 def _residual_log():  # type: ignore[no-untyped-def]
     """Lazy import to avoid module-load failure if core/residual_log isn't
     on sys.path (e.g. minimal dashboard install without full daemon)."""
@@ -592,6 +621,16 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
 
     @app.get("/api/calibration")
     async def calibration() -> JSONResponse:
+        # Prefer the daemon's own gate report from ml-state.json — THE
+        # predicate that arms actuation (8 gates incl. cost + drift belt).
+        # The local recompute below sees only the store-derived subset and
+        # historically disagreed with the daemon (5 vs 6/8 gates —
+        # split-brain readiness). Fallback: daemon dead / pre-field
+        # ml-state → recompute, marked source=dashboard-recompute.
+        daemon_report = _read_daemon_calibration()
+        if daemon_report is not None:
+            return JSONResponse(daemon_report)
+
         now = time.monotonic()
         cached = _calibration_cache.get("body")
         if cached is not None and (now - float(_calibration_cache["ts"])) < _CALIBRATION_CACHE_SEC:
@@ -612,6 +651,7 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
             body = report.to_dict()
             gates_dict = {g["name"]: g for g in body["gates"]}  # type: ignore[index]
             body["gates"] = gates_dict
+            body["source"] = "dashboard-recompute"
             _calibration_cache["ts"] = now
             _calibration_cache["body"] = body
             return JSONResponse(body)
@@ -974,6 +1014,13 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
                 "forecasts": forecasts,
                 "confidence": m.get("confidence"),
                 "model_name": m.get("model_name"),
+                # Degraded = KNN not in the loop (fallback predictor or
+                # chroma down). The tile must not render fallback
+                # confidence as reflective health — it is structural.
+                "degraded": (
+                    m.get("chroma_available") is False
+                    or not str(m.get("model_name") or "").startswith("knn")
+                ),
                 "reason": m.get("reason", ""),
                 "ts": m.get("ts"),
                 "age_sec": round(now - float(m.get("ts") or now), 1),
@@ -1033,6 +1080,72 @@ def create_app(  # noqa: C901 — endpoint registry, breaks readability if split
                     "cause_label", "workload_at_start")
             events = [dict(zip(cols, r, strict=True)) for r in rows]
             return {"events": events, "total": int(total)}
+
+        body = await asyncio.to_thread(_work)
+        return JSONResponse(put(body))
+
+    @app.get("/api/thermal-history")
+    async def thermal_history(
+        since: str | None = None,
+        workload: str | None = None,
+        limit: int = 2000,
+    ) -> JSONResponse:
+        """Long-horizon thermal ledger (daily_rollup — permanent, no TTL).
+
+        Query params: since=YYYY-MM-DD (inclusive), workload=<label|_all>,
+        limit. Same workload bucket compared across months: rising
+        cpu_temp_p95 / fan_rpm_p95 at flat cpu_power_p50 = cooling-path
+        degradation (TIM aging, dust); seasonal ambient shifts read as the
+        idle-bucket baseline moving with the calendar.
+        """
+        cached, put = _cached_endpoint(
+            f"thermal_history:{since}:{workload}:{limit}", 60.0
+        )
+        if cached is not None:
+            return JSONResponse(cached)  # type: ignore[arg-type]
+
+        def _work() -> dict:
+            # Raw read-only query — Store() would run schema DDL, and the
+            # dashboard invariant is «never writes sqlite».
+            path = _store_path()
+            if not path.exists():
+                return {"days": [], "count": 0}
+            sql = (
+                "SELECT day, workload_label, frame_count, cpu_temp_p50, "
+                "cpu_temp_p95, cpu_temp_max, cpu_power_p50, cpu_power_p95, "
+                "gpu_temp_p95, fan_rpm_p50, fan_rpm_p95, fan_rpm_max, "
+                "throttle_events FROM daily_rollup"
+            )
+            clauses, params = [], []
+            if since is not None:
+                clauses.append("day >= ?")
+                params.append(since)
+            if workload is not None:
+                clauses.append("workload_label = ?")
+                params.append(workload)
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
+            sql += " ORDER BY day DESC, workload_label LIMIT ?"
+            params.append(max(1, min(int(limit), 20000)))
+            conn = sqlite3.connect(path)
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                # daily_rollup not created yet (daemon older than the
+                # ledger, or never rotated) — empty, not an error.
+                return {"days": [], "count": 0, "note": "no rollup table yet"}
+            finally:
+                conn.close()
+            cols = (
+                "day", "workload_label", "frame_count", "cpu_temp_p50",
+                "cpu_temp_p95", "cpu_temp_max", "cpu_power_p50",
+                "cpu_power_p95", "gpu_temp_p95", "fan_rpm_p50",
+                "fan_rpm_p95", "fan_rpm_max", "throttle_events",
+            )
+            return {
+                "days": [dict(zip(cols, r, strict=True)) for r in rows],
+                "count": len(rows),
+            }
 
         body = await asyncio.to_thread(_work)
         return JSONResponse(put(body))

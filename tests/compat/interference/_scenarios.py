@@ -443,29 +443,26 @@ SCENARIOS: list[Scenario] = [
     # ------------------------------------------------------------------
     Scenario(
         name="s15-asusctl-baseline-drift",
-        title="User edits fan-curve via GUI within 300s of coolstep snapshot → revert overwrites user change (GAP)",
+        title="User edits fan-curve via GUI within 300s of coolstep snapshot → revert cedes to user curve (COVERED 2026-07-10)",
         base_snapshot="asus_tuf_a15_7940hs",
         other_actors={},
         env={"COOLSTEP_ACTUATOR_ENABLE": "1"},
         expected={
             "explanation": (
                 "asusctl_fan_curve._baseline_ttl_s = 300. coolstep snapshots "
-                "current curve at t=0. User opens ROG Control Center at t=100, "
-                "edits CPU fan to be quieter. coolstep apply()s an action at "
-                "t=150, expires at t=270, then revert() restores the *original* "
-                "baseline — clobbering the user's manual change. No detection "
-                "of intra-window drift."
+                "current curve at t=0; user edits the curve mid-window. "
+                "revert() now re-reads the live curve first: if it matches "
+                "neither the last issued curve nor the saved baseline, the "
+                "user took ownership — restore is skipped, the stale "
+                "baseline is dropped (next apply re-snapshots), and the "
+                "journal records the cession. _ensure_baseline() also "
+                "refuses to adopt our own issued curve as baseline when the "
+                "TTL lapses while a bias is applied."
             ),
-            "baseline_drift_detection": False,
+            "baseline_drift_detection": True,
         },
-        bugcase_status="gap",
-        fix_proposal=(
-            "Before revert(), re-read current curve via `asusctl fan-curve -j` "
-            "and diff against the captured baseline. If they differ AND coolstep "
-            "did not apply in between, treat as user manual override: skip the "
-            "revert, log a `user_override_detected` event."
-        ),
-        upstream_reference="asusctl_fan_curve.py:_baseline_ttl_s + revert() logic",
+        bugcase_status="covered",
+        upstream_reference="asusctl_fan_curve.py:revert + _ensure_baseline (S15 guards)",
     ),
 
     # ------------------------------------------------------------------

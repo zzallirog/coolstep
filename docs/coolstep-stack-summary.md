@@ -2,6 +2,8 @@
 
 > Written 2026-05-12. Audience: new developer or new host setup.
 > For design rationale see `docs/stack-decisions.md`; for physics background see `docs/physics-rationale.md`.
+> ⚠ Snapshot as of v0.3.0; collector/route/tile counts have grown since —
+> see `coolstep/dashboard/CLAUDE.md` and `coolstep/adapters/collectors/CLAUDE.md` for current inventories.
 
 ---
 
@@ -83,8 +85,10 @@ Side-writes at each tick: `ChromaDB` (vector + metadata), `runtime-state.json` (
 
 ## Collectors
 
-Four collectors run in parallel each tick via `asyncio.gather`. Each returns a partial dict;
+Collectors run in parallel each tick via `asyncio.gather`. Each returns a partial dict;
 `merge_partial()` in `core/schema.py` accumulates into one `TelemetryFrame`.
+There are now **12** collectors — see `coolstep/adapters/collectors/CLAUDE.md`
+for the full inventory; the original four are:
 
 | Name | Source | Key fields | Typical cost |
 |------|--------|-----------|--------------|
@@ -133,7 +137,9 @@ Runs in parallel; result merged via `max()`:
 When trajectory dominates: `confidence = min(0.7, knn_conf + 0.2)` — bumped so
 `RAMP_COOLING` can clear the `min_arm_confidence = 0.5` gate.
 
-`AlwaysIdleBaseline` (P0 stub) replaces KnnPredictor when ChromaDB is unavailable.
+`MetaPredictor(TrajectoryBaseline)` (`trajectory_baseline+meta`, ADR-017) replaces KnnPredictor
+when ChromaDB is unavailable or disabled — it carries the trajectory overlay, so the fallback
+still predicts (the older `AlwaysIdleBaseline` P0 stub is no longer wired into the daemon).
 
 ---
 
@@ -281,7 +287,7 @@ to SQLite. Separate process from the collector daemon.
 
 | Tile | Data source | Refresh |
 |------|-------------|---------|
-| `live-telemetry-tile` | SSE stream → `/api/sse/telemetry` (1 Hz) | live |
+| `live-telemetry-tile` | polls `/api/telemetry/latest` (SSE removed — ADR-008 deprecated 2026-05-14) | live |
 | `calibration-state-tile` | `/api/calibration` (core/calibration.py) | 30 s |
 | `adapters-health-tile` | `/api/adapters` (live discovery + cost probe) | 30 s |
 | `actuator-history-tile` | `/api/actuator-journal` + TTL countdown | 10 s |
@@ -304,7 +310,6 @@ to SQLite. Separate process from the collector daemon.
 | `GET /api/neighbours` | KNN top-K from `ml-state.json` |
 | `GET /api/stress-state` | active stress scenario (or `{}` if stale) |
 | `GET /api/stress-runs` | bench run summaries from `bench/runs/index.json` |
-| `GET /api/sse/telemetry` | SSE stream, 1 event/s, `{ts, cpu_temp, …}` |
 
 **Masthead pills** in `dashboard.js`: health indicator, calibration-ready badge, ml-state age.
 
@@ -315,6 +320,10 @@ to SQLite. Separate process from the collector daemon.
 `coolstep/core/calibration.py:evaluate()`. All gates must pass for `calibration_ready=True`.
 Evaluated every 60 ticks (~1 min). Coverage counted as `frame_count × COVERAGE_PERIOD_SEC`
 (cumulative uptime, ignores suspend/reboot gaps — incident 2026-05-10).
+The daemon passes its real cost metrics + ring, so all 8 gates are live, and dumps the full
+gate report into `ml-state.json` (`calibration` key); `GET /api/calibration` serves that daemon
+report (`source: "daemon"`), falling back to a store-only 5-gate recompute
+(`source: "dashboard-recompute"`) when the daemon is dead.
 
 | Gate | Measures | Default target | Env override |
 |------|----------|---------------|--------------|
@@ -323,8 +332,8 @@ Evaluated every 60 ticks (~1 min). Coverage counted as `frame_count × COVERAGE_
 | `peak_amplitude` | `MAX(cpu_temp)` in `frames` | 85.0°C | `COOLSTEP_PEAK_TEMP` |
 | `class_diversity` | `COUNT(DISTINCT workload_label)` excluding `''` and `'unknown'` | 5 clusters | `COOLSTEP_WORKLOAD_CLUSTERS` |
 | `hyprctl_consistency` | % frames with active cpu_temp but no workload label | < 5% | `COOLSTEP_HYPRCTL_MISS_PCT` |
-| `cost_rss` | RSS KB (when passed by caller) | < 50 000 KB | `COOLSTEP_COST_RSS_KB` |
-| `cost_cpu` | CPU % (when passed by caller) | < 1.0% | `COOLSTEP_COST_CPU_PCT` |
+| `cost_rss` | Daemon RSS KB (live self-metrics) | < 50 000 KB | `COOLSTEP_COST_RSS_KB` |
+| `cost_cpu` | Daemon CPU % (live self-metrics) | < 1.0% | `COOLSTEP_COST_CPU_PCT` |
 | `ring_warmup` | `len(ring) >= ring.capacity // 2` | 300 frames | n/a |
 
 ---
@@ -364,6 +373,8 @@ or export in shell for ad-hoc runs.
 | `COOLSTEP_T_AMBIENT` | `30.0` | Ambient temperature baseline for efficiency curve (`core/efficiency.py`) | set to measured room temp for accurate sweet-spot calculation |
 | `COOLSTEP_COST_RSS_KB` | `50 000` | Calibration gate: max RSS in KB | raise if P1 ML inference adds memory |
 | `COOLSTEP_COST_CPU_PCT` | `1.0` | Calibration gate: max daemon CPU % | raise if host is weaker |
+| `COOLSTEP_CHROMA_FORCE` | unset | `1` = override the Python ≥ 3.14 chroma auto-guard and import chromadb anyway | fixed chromadb build on 3.14 |
+| `COOLSTEP_DRIFT_DISARM_SEVERITY` | `0.8` | Drift indicator severity at/above which `calibration_ready` is held `False` (actuator disarmed) | raise only if a known-noisy indicator false-fires |
 
 ---
 
@@ -433,7 +444,7 @@ Pending items tracked in `TODO.md`:
 
 - **P0 calibration window** — 14-day passive run. Gates to clear: `coverage_hours=168`,
   `throttle_events=10`, `peak_amplitude=85°C`. Active since ~2026-05-03.
-- **P1** — HDBSCAN workload classifier + XGBoostPredictor replacing `AlwaysIdleBaseline`;
+- **P1** — HDBSCAN workload classifier + XGBoostPredictor replacing the baseline fallback;
   nightly training pipeline; linux_perf collector for richer fingerprint.
 - **P2** — live actuator enable after P0 calibration + P1 predictor validated (recall ≥ 0.6).
 - **P3–P6** — multi-platform: Linux desktop (no Hyprland/iGPU), server (Redfish/IPMI), Windows, macOS.

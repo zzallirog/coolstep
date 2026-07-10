@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +55,27 @@ class ChromaStore:
         # P2.5 — operational kill switch. The chromadb rust bindings have
         # been segfaulting on this host since 2026-05-11; setting
         # `COOLSTEP_CHROMA_DISABLED=1` makes the daemon fall back to
-        # AlwaysIdleBaseline instead of crash-looping. Predictor degrades
+        # MetaPredictor(TrajectoryBaseline) instead of crash-looping (see
+        # ADR-017; daemon.py predictor wiring). Predictor degrades
         # gracefully — calibration paused, no KNN learning, but the
         # adaptive curve / mode switching / incident logger keep working.
         if os.environ.get("COOLSTEP_CHROMA_DISABLED", "").lower() in {"1", "true", "yes"}:
             log.warning("ChromaDB disabled via COOLSTEP_CHROMA_DISABLED — using fallback predictor")
+            return False
+        # Python 3.14 guard — README promises «daemon detects and falls back
+        # automatically» for the known chromadb rust-bindings segfault on
+        # 3.14 (rust.py:440 Collection._get). A segfault kills the process
+        # before any except-clause, so detection must happen BEFORE import.
+        # Opt back in (e.g. a fixed chromadb build) via COOLSTEP_CHROMA_FORCE=1.
+        if (
+            sys.version_info >= (3, 14)
+            and os.environ.get("COOLSTEP_CHROMA_FORCE", "").lower() not in {"1", "true"}
+        ):
+            log.warning(
+                "Python %d.%d: chromadb rust bindings are known to segfault on 3.14 "
+                "— using fallback predictor (set COOLSTEP_CHROMA_FORCE=1 to override)",
+                sys.version_info[0], sys.version_info[1],
+            )
             return False
         try:
             import chromadb

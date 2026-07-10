@@ -73,6 +73,29 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Long-horizon thermal ledger. One row per (UTC day × workload label) +
+-- an '_all' pooled row per day. NO TTL — this is the permanent record
+-- that survives the 14-day frames eviction, so seasonal phase shifts
+-- (winter/summer ambient), thermal-interface degradation and dust
+-- build-up stay measurable years later: same workload bucket, rising
+-- temp_p95 / fan_p95 at flat power_p50 = the cooling path got worse.
+CREATE TABLE IF NOT EXISTS daily_rollup (
+    day             TEXT NOT NULL,      -- YYYY-MM-DD (UTC)
+    workload_label  TEXT NOT NULL,      -- '' = unlabeled, '_all' = pooled
+    frame_count     INTEGER NOT NULL,
+    cpu_temp_p50    REAL,
+    cpu_temp_p95    REAL,
+    cpu_temp_max    REAL,
+    cpu_power_p50   REAL,
+    cpu_power_p95   REAL,
+    gpu_temp_p95    REAL,
+    fan_rpm_p50     REAL,
+    fan_rpm_p95     REAL,
+    fan_rpm_max     REAL,
+    throttle_events INTEGER NOT NULL DEFAULT 0,  -- only on '_all' rows
+    PRIMARY KEY (day, workload_label)
+);
 """
 
 
@@ -220,6 +243,12 @@ class Store:
         the writer lock — see `_writes_paused` on `__init__`.
         """
         now_ts = now if now is not None else time.time()
+        # Roll up complete days BEFORE eviction — a day must land in the
+        # permanent ledger before its frames can age out of the 14-day TTL.
+        try:
+            self.rollup_days(now=now_ts)
+        except Exception:  # noqa: BLE001 — rollup must never block eviction
+            pass
         self._writes_paused = True
         try:
             with self._lock:
@@ -240,6 +269,145 @@ class Store:
         finally:
             self._writes_paused = False
         return frames_del, events_del
+
+    def rollup_days(self, now: float | None = None) -> int:
+        """Aggregate every COMPLETE UTC day not yet in `daily_rollup`.
+
+        High-water mark lives in `meta['rollup_day_done']` (YYYY-MM-DD).
+        Days are aggregated in Python (sqlite has no percentile): one
+        day at 1 Hz ≈ 86 400 rows — fine on the rotate() worker thread.
+        Returns the number of day-rows written. Idempotent: re-running a
+        day REPLACEs the same primary keys.
+        """
+        import datetime as _dt
+
+        now_ts = now if now is not None else time.time()
+        today = _dt.datetime.fromtimestamp(now_ts, tz=_dt.timezone.utc).date()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='rollup_day_done'"
+            ).fetchone()
+            first_ts_row = self._conn.execute(
+                "SELECT MIN(ts) FROM frames"
+            ).fetchone()
+        if first_ts_row is None or first_ts_row[0] is None:
+            return 0
+        first_day = _dt.datetime.fromtimestamp(
+            float(first_ts_row[0]), tz=_dt.timezone.utc
+        ).date()
+        if row is not None:
+            done = _dt.date.fromisoformat(row[0])
+            start_day = max(first_day, done + _dt.timedelta(days=1))
+        else:
+            start_day = first_day
+        written = 0
+        day = start_day
+        while day < today:  # strictly complete days only
+            written += self._rollup_one_day(day)
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) "
+                    "VALUES ('rollup_day_done', ?)",
+                    (day.isoformat(),),
+                )
+                self._conn.commit()
+            day += _dt.timedelta(days=1)
+        return written
+
+    def _rollup_one_day(self, day) -> int:  # type: ignore[no-untyped-def]
+        import datetime as _dt
+
+        day_start = _dt.datetime.combine(
+            day, _dt.time.min, tzinfo=_dt.timezone.utc
+        ).timestamp()
+        day_end = day_start + 86400.0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT workload_label, cpu_temp, cpu_power, gpu_temp, "
+                "fan_max_rpm FROM frames WHERE ts >= ? AND ts < ?",
+                (day_start, day_end),
+            ).fetchall()
+            throttle_count = int(self._conn.execute(
+                "SELECT COUNT(*) FROM throttle_events "
+                "WHERE ts_start >= ? AND ts_start < ?",
+                (day_start, day_end),
+            ).fetchone()[0])
+        if not rows:
+            return 0
+
+        def _pct(sorted_vals: list[float], pct: float) -> float | None:
+            if not sorted_vals:
+                return None
+            idx = min(len(sorted_vals) - 1, int(len(sorted_vals) * pct / 100.0))
+            return sorted_vals[idx]
+
+        groups: dict[str, list[tuple]] = {"_all": []}
+        for r in rows:
+            label = r[0] or ""
+            groups.setdefault(label, []).append(r)
+            groups["_all"].append(r)
+
+        out_rows = []
+        for label, grp in groups.items():
+            temps = sorted(r[1] for r in grp if r[1] is not None and r[1] > 0)
+            powers = sorted(r[2] for r in grp if r[2] is not None and r[2] > 0)
+            gpu_temps = sorted(r[3] for r in grp if r[3] is not None and r[3] > 0)
+            fans = sorted(r[4] for r in grp if r[4] is not None and r[4] > 0)
+            out_rows.append((
+                day.isoformat(), label, len(grp),
+                _pct(temps, 50), _pct(temps, 95),
+                temps[-1] if temps else None,
+                _pct(powers, 50), _pct(powers, 95),
+                _pct(gpu_temps, 95),
+                _pct(fans, 50), _pct(fans, 95),
+                fans[-1] if fans else None,
+                throttle_count if label == "_all" else 0,
+            ))
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO daily_rollup "
+                "(day, workload_label, frame_count, cpu_temp_p50, cpu_temp_p95, "
+                " cpu_temp_max, cpu_power_p50, cpu_power_p95, gpu_temp_p95, "
+                " fan_rpm_p50, fan_rpm_p95, fan_rpm_max, throttle_events) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                out_rows,
+            )
+            self._conn.commit()
+        return len(out_rows)
+
+    def read_rollup(
+        self,
+        since_day: str | None = None,
+        workload_label: str | None = None,
+        limit: int = 2000,
+    ) -> list[dict[str, object]]:
+        """Read the long-horizon ledger, newest day first."""
+        sql = (
+            "SELECT day, workload_label, frame_count, cpu_temp_p50, "
+            "cpu_temp_p95, cpu_temp_max, cpu_power_p50, cpu_power_p95, "
+            "gpu_temp_p95, fan_rpm_p50, fan_rpm_p95, fan_rpm_max, "
+            "throttle_events FROM daily_rollup"
+        )
+        clauses, params = [], []
+        if since_day is not None:
+            clauses.append("day >= ?")
+            params.append(since_day)
+        if workload_label is not None:
+            clauses.append("workload_label = ?")
+            params.append(workload_label)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY day DESC, workload_label LIMIT ?"
+        params.append(int(limit))
+        cols = (
+            "day", "workload_label", "frame_count", "cpu_temp_p50",
+            "cpu_temp_p95", "cpu_temp_max", "cpu_power_p50", "cpu_power_p95",
+            "gpu_temp_p95", "fan_rpm_p50", "fan_rpm_p95", "fan_rpm_max",
+            "throttle_events",
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(zip(cols, r, strict=True)) for r in rows]
 
     def vacuum(self) -> int:
         """Rewrite the DB to reclaim freed pages. Returns bytes freed.

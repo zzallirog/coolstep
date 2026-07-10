@@ -468,6 +468,7 @@ def test_control_apply_records_intervention_window(tmp_path, monkeypatch):
     """A successful hardware control write marks its active causal window."""
     from coolstep.daemon import COOLSTEP_TTL_GRACE_SEC
 
+    monkeypatch.setenv("COOLSTEP_ACTUATOR_ENABLE", "1")
     daemon = _daemon_with_home(tmp_path, monkeypatch)
     actuator = _FakeTTLActuator()
     action = _make_action(expires_at=130.0)
@@ -480,6 +481,24 @@ def test_control_apply_records_intervention_window(tmp_path, monkeypatch):
         131.0 + COOLSTEP_TTL_GRACE_SEC,
         140.0 + COOLSTEP_TTL_GRACE_SEC,
     ) == ()
+
+
+def test_dry_run_apply_does_not_record_intervention_window(tmp_path, monkeypatch):
+    """Dry-run (COOLSTEP_ACTUATOR_ENABLE unset — shipped default) never
+    touches hardware, so it must NOT open an intervention window: those
+    residuals are pure passive thermal behaviour and belong in the bank."""
+    monkeypatch.delenv("COOLSTEP_ACTUATOR_ENABLE", raising=False)
+    daemon = _daemon_with_home(tmp_path, monkeypatch)
+    actuator = _FakeTTLActuator()
+    action = _make_action(expires_at=130.0)
+    monkeypatch.setattr("coolstep.daemon.time.time", lambda: 100.0)
+
+    daemon._do_apply(actuator, action)
+
+    # Armed lifecycle still simulated (TTL revert parity)…
+    assert actuator.name in daemon._armed_actions
+    # …but no causal window: residuals stay eligible for passive training.
+    assert daemon._interventions_overlapping(95.0, 105.0) == ()
 
 
 def test_intervened_validation_does_not_train_residual_bank(tmp_path, monkeypatch):
@@ -740,6 +759,7 @@ def test_startup_recovery_marks_live_armed_as_intervention(tmp_path, monkeypatch
     import json
 
     monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    monkeypatch.setenv("COOLSTEP_ACTUATOR_ENABLE", "1")
     monkeypatch.setattr("coolstep.daemon.time.time", lambda: 100.0)
     state = {
         "throttle_state": "idle",

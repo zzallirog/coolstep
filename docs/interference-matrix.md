@@ -24,9 +24,9 @@
 
 ## Scenario catalogue
 
-Lives in `tests/compat/interference/_scenarios.py`. **19 tests** as of
-2026-05-12 covering 12 unique interference patterns (S01-S17, see table
-below). Each `Scenario` declares `bugcase_status` ∈ {`covered`, `gap`, `design`}:
+Lives in `tests/compat/interference/_scenarios.py`. **17 scenarios**
+(S01-S17, see table below), each parametrized through
+`test_interference.py`. Each `Scenario` declares `bugcase_status` ∈ {`covered`, `gap`, `design`}:
 
 - **covered** — coolstep has an explicit gate; test asserts the gate
   holds. If someone refactors and breaks the gate, the test fails.
@@ -52,17 +52,19 @@ below). Each `Scenario` declares `bugcase_status` ∈ {`covered`, `gap`, `design
 | S12 | Laptop without any fan-control tool | ✅ covered | `has_battery && !asusctl && !nbfc && …` triggers warning + community pointers |
 | S13 | Feral `gamemoded.service` vs Hyprland `game-mode.service` | ✅ **closed 2026-05-12** | Both `asusctl_fan_curve._is_game_mode_active` + `game_mode_optimizer._is_game_mode_active` now probe `gamemoded.service` (system unit) alongside `--user game-mode.service` |
 | S14 | `nvidia-persistenced.service` keeps GPU driver loaded → idle GPU draws 25W not 6W | ❌ **gap** | No `caps.nvidia_persistence_mode` field; calibration baselines biased pessimistic |
-| S15 | User edits asusctl curve via ROG Control Center within 300s window | ❌ **gap** | `revert()` blindly restores `_baseline` without re-reading current curve — user's manual change clobbered |
+| S15 | User edits asusctl curve via ROG Control Center within 300s window | ✅ **closed 2026-07-10** | Two guards: `revert()` re-reads the live curve first and cedes to an external user edit instead of clobbering it; `_ensure_baseline()` refuses to adopt coolstep's own issued curve as baseline |
 | S16 | `ryzenadj` installed but sudoers `NOPASSWD` entry missing | ✅ **closed 2026-05-12** | `ryzenadj_cap._sudoers_preflight()` runs `sudo -n /usr/bin/ryzenadj --version` at startup; refuses to load if rc≠0 + logs the exact snippet to install |
 | S17 | Server facet user-overrides `COOLSTEP_ACTUATOR_ENABLE=1` | ⚙ design | BMC firmware revokes any write within ~2s; install_plan still emits the disable env, user opts in at own risk |
 
-### Summary (2026-05-12 end of session)
+### Summary (updated 2026-07-10)
 
-**9 covered / 4 open / 4 design.** 4 gaps closed this session by adding
+**10 covered / 3 open / 4 design.** 4 gaps closed 2026-05-12 by adding
 real code gates (S03, S04, S13, S16) — see git log + `epp_shift.py::make()`,
 `ryzenadj_cap.py::_sudoers_preflight()`, `_is_game_mode_active()` in both
-asusctl actuators. Remaining open: S08 inter-process lock, S10 Hyprland
-socket verify, S14 nvidia persistence mode, S15 asusctl baseline drift.
+asusctl actuators. S15 (asusctl baseline drift) closed 2026-07-10 with
+the `revert()` live-curve re-read + `_ensure_baseline()` self-curve
+refusal. Remaining open: S08 inter-process lock, S10 Hyprland
+socket verify, S14 nvidia persistence mode.
 Each is tracked in `TODO.md` under "🛡️ INTERFERENCE GATES".
 
 ## How to read the matrix

@@ -202,6 +202,20 @@ sparkline queries are fast. The full frame is also stored as a JSON
 blob for forensics — `coolstep export` and `coolstep export-telemetry`
 both read from the blob, not the shortcut columns.
 
+### `daily_rollup` — the permanent thermal ledger
+
+Beside the rolling `frames` table, the store keeps a `daily_rollup`
+table: one row per UTC day × workload label, plus an `_all` pooled row
+per day. Each row aggregates the shortcut columns —
+`cpu_temp_p50/p95/max`, `cpu_power_p50/p95`, `gpu_temp_p95`,
+`fan_rpm_p50/p95/max` — and a `throttle_events` count (on `_all` rows).
+**No TTL**: `store.rotate()` fills it for every complete day *before*
+evicting that day's frames, so the per-day percentiles outlive the
+14-day window permanently (KB per day). This is what makes seasonal
+ambient shifts, thermal-interface degradation and dust build-up
+measurable years later. Served by
+`GET /api/thermal-history?since=YYYY-MM-DD&workload=X`.
+
 ## See also
 
 - [architecture.md](architecture.md) — how the schema fits into the

@@ -65,7 +65,8 @@ to ship a vendored copy.
 no VictoriaMetrics.
 
 **Why:** the data fits. At 1 Hz with 14-day retention, a host stores
-about 1.2 million frames — under 200 MB compressed. SQLite handles
+about 1.2 million frames — 1.5–2 GB steady-state on disk (`VACUUM`
+reclaims to ~1.5 GB). SQLite handles
 that comfortably. Running a separate TSDB daemon for one host's data
 would be heavier than the daemon itself. The dashboard reads SQLite
 directly via a connection pool.
@@ -188,14 +189,19 @@ we'd consider direct ec_sys access, but only with very loud opt-in.
 
 ## ADR-011: 1 Hz default, sub-second only on request
 
-**Decision:** the tick rate is 1 Hz. Faster sampling is available via
-`COOLSTEP_TICK_HZ=2` (or higher) but isn't recommended.
+**Decision:** the deployed tick rate is 1 Hz — the shipped systemd
+unit runs `coolstep-collector --period 1.0`, and the storage math
+(ADR-004) assumes it. Faster sampling is available via the `--period`
+CLI flag but isn't recommended for the persistent store. Note the
+code default (`DEFAULT_PERIOD = 0.1`, 10 Hz — P2.9 cockpit
+responsiveness) applies only when running `coolstep-collector` by
+hand without `--period`.
 
 **Why:** 1 Hz is enough for predicting thermal events (which take
 seconds to develop) and easy on the kernel. Per-tick collector budget
 is 300 ms total, distributed across whichever adapters are active.
-Going to 10 Hz would multiply CPU overhead 10× for no measurable
-improvement in prediction quality.
+Running the persistent store at 10 Hz would multiply CPU and storage
+overhead 10× for no measurable improvement in prediction quality.
 
 **When to revisit:** if we add a use case that needs sub-second
 reaction (gaming frame-pacing? hard-real-time fan control?), we'd
@@ -225,8 +231,9 @@ gets official stubs, we'd move adapters to strict.
 similarity over a ChromaDB HNSW index. xgboost (per ADR-005) is the
 planned upgrade.
 
-**Why:** KNN explains itself. The dashboard's `<neighbours-tile>` shows
-the top-5 closest historical states and how each one voted on
+**Why:** KNN explains itself. The predictor queries the top-20 closest
+historical states (`top_k=20`); the dashboard's `<neighbours-tile>`
+renders the top-5 of them and how each one voted on
 `was_hot_in_30s`. A user can trust a prediction by looking at the
 neighbours: "these five past states looked like now, four of them got
 hot 30 seconds later." That transparency is worth more than the small

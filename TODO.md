@@ -1,5 +1,27 @@
 # TODO
 
+## ⚡ Post-audit handoff — следующая арч-сессия (2026-07-10, fix-pack уже в репе)
+
+Fix-pack аудита синкнулся с Мака (см. CHANGELOG [Unreleased]). На арче руками:
+
+- [ ] `systemctl --user restart coolstep-collector coolstep-dashboard` —
+      подобрать fix-pack (trajectory-overlay в fallback, calibration
+      unification, daily_rollup, drift disarm).
+- [ ] Смок после рестарта: кокпит показывает «⛔ fallback» чип;
+      `/api/calibration` отдаёт `source: "daemon"` и 8 gates;
+      `journalctl --user -u coolstep-collector | grep trajectory` при
+      первом горячем склоне; через ~10 мин `sqlite3 store.db 'SELECT
+      COUNT(*) FROM daily_rollup'` — первый catch-up rollup за 14 дней.
+- [ ] **Release-gate замер (Feynman-floor):** `coolstep predict-replay`
+      на архиве store.db — trajectory_baseline+meta vs KNN vs naive.
+      Нет числа — нет клайма «predictive» в README.
+- [ ] **HNSW flip** (Phase 2 из секции P3.0 ниже): `COOLSTEP_KNN_DUAL=1`
+      dual-write soak 7d → Jaccard gate → флип. После флипа KNN живёт
+      без chromadb → py3.14 SEGV-сага закрывается целиком.
+- [ ] Store hygiene: `PRAGMA wal_checkpoint(TRUNCATE); VACUUM;` офлайн
+      (3.6 GB → ~1.5 GB, рецепт в core/store.py docstring).
+
+
 > **At-a-glance:** repo on P2.5 (2026-05-12). See
 > `docs/p2.5-rollup.md` for full file inventory; followup items are listed
 > below under "Phase P2.5 followup". The new **Interference test pillar**
@@ -55,12 +77,11 @@ Architecture не трогаем (KNN bias is intentional safe direction).
 понимала свою же conservative bias.
 
 ### P2.9.1 — Spike state exit on persistent negative residual
-- [ ] `core/spike_detector.py`: add exit gate «closes when residual
+- [x] `core/spike_detector.py`: exit gate «closes when residual
       stays signed-negative beyond -N°C for M ticks» (defaults M=10,
-      N=5).  Close as `predictor_margin_exceeded`, не как настоящий
-      interactive spike.
-- [ ] Tests: no false closures on transient cooling dip mid-hot;
-      closes on sustained negative-residual margin.
+      N=5) — ЖИВЁТ в коде (negative_exit_thresh_c=5.0, negative_exit_n=10);
+      чекбокс был stale (audit 2026-07-10).
+- [x] Tests: negative-exit покрыт в tests/test_spike_detector.py.
 - *Why: live cockpit показывает spike kitty 2043s open 34min с
   workload=kitty просто потому что residual стабильно −20°C → exit
   <2°C abs недостижим.*

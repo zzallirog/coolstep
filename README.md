@@ -8,8 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![v0.5.19](https://img.shields.io/badge/release-v0.5.19-orange)](https://github.com/zzallirog/coolstep/releases/tag/v0.5.19)
-[![tests](https://img.shields.io/badge/tests-913_passed-brightgreen)](#tested-against)
-[![interference](https://img.shields.io/badge/interference_matrix-9%E2%9C%93%2F4_open-blue)](docs/interference-matrix.md)
+[![tests](https://img.shields.io/badge/tests-1018_passed-brightgreen)](#tested-against)
+[![interference](https://img.shields.io/badge/interference_matrix-10%E2%9C%93%2F3_open-blue)](docs/interference-matrix.md)
 
 <picture>
   <source srcset="docs/img/dashboard-hero.webp" type="image/webp">
@@ -161,8 +161,8 @@ coordination points visible:
 | Container | Alpine LXC (degenerate `/sys`) |
 
 **Interference matrix** — 17 scenarios assert what happens when coolstep
-collides with another actor that owns part of the same surface. **9 covered
-gates · 4 open gaps · 4 structural separations.** The matrix is honest:
+collides with another actor that owns part of the same surface. **10 covered
+gates · 3 open gaps · 4 structural separations.** The matrix is honest:
 known unfixed conflicts carry explicit fix proposals and stay visible until
 closed.
 
@@ -187,7 +187,8 @@ switch to the actuator journal.
 
 Two install paths. Both put a `coolstep` binary on your `PATH` that
 runs from anywhere, plus two daemon entry points (`coolstep-collector`,
-`coolstep-dashboard`) that you opt into separately.
+`coolstep-dashboard`) and an MCP server (`coolstep-mcp`) that you opt
+into separately.
 
 > **⚠ Never `sudo pip install`.** coolstep is a user-level tool. The
 > daemon runs as your regular user; data and config live under
@@ -218,11 +219,12 @@ with system Python packages. Easy to upgrade
 **Expected output.** A progress bar, then:
 
 ```
-  installed package coolstep 0.5.4, installed using Python 3.12+
+  installed package coolstep 0.5.19, installed using Python 3.12+
   These apps are now available:
     - coolstep
     - coolstep-collector
     - coolstep-dashboard
+    - coolstep-mcp
 done! ✨ 🌟 ✨
 ```
 
@@ -254,7 +256,7 @@ keeps the install in `~/.local/` and never touches system packages.
 **Expected output.** Standard pip output, ending in:
 
 ```
-Successfully installed coolstep-0.5.4
+Successfully installed coolstep-0.5.19
 ```
 
 ---
@@ -356,11 +358,13 @@ override — and even then, only after the eight calibration gates
 
 - Linux kernel ≥ 5.10
 - Python 3.10–3.13 recommended. **Python 3.14** triggers a known
-  `chromadb` rust-bindings segfault — the daemon detects and falls
-  back to `AlwaysIdleBaseline` automatically (no KNN, predictions
-  return 0.0), but you lose the predictor entirely. Either downgrade
-  to 3.13 *or* set `COOLSTEP_CHROMA_DISABLED=1` explicitly to silence
-  the warning and run dashboard-only. See
+  `chromadb` rust-bindings segfault — the daemon detects 3.14 before
+  the import and falls back to the `trajectory_baseline+meta`
+  predictor automatically (physics trajectory overlay + per-bucket
+  meta-corrections; no KNN memory recall). Either downgrade to 3.13,
+  set `COOLSTEP_CHROMA_FORCE=1` to opt back in on a fixed `chromadb`
+  build, *or* set `COOLSTEP_CHROMA_DISABLED=1` explicitly to silence
+  the warning. See
   [troubleshooting](docs/troubleshooting.md#chromadb-segfaults-on-python-314).
 - One of `pipx`, `pip`, or `uv` (most distros have at least one
   pre-installed; minimal hosts like Proxmox base or Alpine may need a

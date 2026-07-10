@@ -73,6 +73,22 @@ def test_supports_other_verbs_always_false(monkeypatch):
     assert mock_run.call_count == 0
 
 
+def test_supports_false_when_batch_defer_flag_present(monkeypatch, tmp_path):
+    """Batch sentinel flag present → stand down even with game-mode active.
+
+    The night batch is a zero-CPU-fan-actuator window: neither
+    asusctl_fan_curve_bias nor game_mode_optimizer fires.
+    """
+    monkeypatch.setenv("COOLSTEP_HOME", str(tmp_path))
+    monkeypatch.setenv("COOLSTEP_GAME_MODE_DEFER", "1")
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER", raising=False)
+    monkeypatch.delenv("COOLSTEP_BATCH_DEFER_PATH", raising=False)
+    (tmp_path / "batch-defer.flag").write_text("")
+    a = GameModeOptimizer()
+    with patch("subprocess.run", return_value=_gm_active()):
+        assert a.supports(ActionVerb.RAMP_COOLING) is False
+
+
 # ── apply() ──────────────────────────────────────────────────────────────
 
 

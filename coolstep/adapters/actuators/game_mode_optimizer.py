@@ -37,7 +37,10 @@ from collections import deque
 from collections.abc import Iterable
 from threading import RLock
 
-from coolstep.adapters.actuators._base import append_journal_event
+from coolstep.adapters.actuators._base import (
+    append_journal_event,
+    is_batch_defer_active,
+)
 from coolstep.core.schema import Action, ActionResult, ActionVerb, SimResult
 
 log = logging.getLogger(__name__)
@@ -97,6 +100,11 @@ class GameModeOptimizer:
           active + DEFER=0            → False   (asusctl_fan_curve_bias owns, cooperative)
         """
         if verb != ActionVerb.RAMP_COOLING:
+            return False
+        # An external compute-batch owns the CPU-fan verb (quiet night batch) —
+        # stand down even if game-mode is also active, so the batch window is a
+        # zero-CPU-fan-actuator window. Symmetric with asusctl_fan_curve_bias.
+        if is_batch_defer_active():
             return False
         if not self._is_game_mode_active():
             return False
